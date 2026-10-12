@@ -353,6 +353,24 @@ def do_find_by_date():
             wrapped("      Motive", motive, width=12)
         print()
 
+    # ── Fire notification for each lead scheduled TODAY ──────────────────
+    notified_leads = []
+    for r in results:
+        a = r["analysis"]
+        fired = notify_if_due_today(
+            lead_id                = r["lead_id"],
+            scheduled_followup_date= a.get("scheduled_followup_date"),
+            scheduled_followup_time= a.get("scheduled_followup_time", "Not specified"),
+            recommended_action     = a.get("recommended_action", "FOLLOW_UP"),
+            motive_summary         = a.get("motive_summary", ""),
+            bde_id                 = r["bde_id"],
+        )
+        if fired:
+            notified_leads.append(r["lead_id"])
+
+    if notified_leads:
+        print(f"  * Notifications sent for today's leads: {', '.join(notified_leads)}")
+
     line()
 
 # ---------------------------------------------------------------------------
