@@ -1,0 +1,90 @@
+{
+  "2c92776f": {
+    "id": "2c92776f",
+    "client_name": "Priya Nair",
+    "company": "RetailMax",
+    "bde_note": "Wants revised pricing by today",
+    "sales_stage": "NEGOTIATION",
+    "priority": "HIGH",
+    "scheduled_followup_date": "21 Sep 2026",
+    "scheduled_followup_time": "2:00 PM - 4:00 PM",
+    "registered_at": "2026-09-21T10:27:54"
+  },
+  "4c53dc3b": {
+    "id": "4c53dc3b",
+    "client_name": "Priya Nair",
+    "company": "RetailMax",
+    "bde_note": "Wants revised pricing by today",
+    "sales_stage": "NEGOTIATION",
+    "priority": "HIGH",
+    "scheduled_followup_date": "21 Sep 2026",
+    "scheduled_followup_time": "2:00 PM - 4:00 PM",
+    "registered_at": "2026-09-21T10:28:15"
+  },
+  "e0897a20": {
+    "id": "e0897a20",
+    "client_name": "Rahul Singh",
+    "company": "NovaCorp",
+    "bde_note": "Board approval in progress",
+    "sales_stage": "DECISION",
+    "priority": "HIGH",
+    "scheduled_followup_date": "28 Sep 2026",
+    "scheduled_followup_time": "Morning",
+    "registered_at": "2026-09-21T10:28:17"
+  },
+  "4c365b52": {
+    "id": "4c365b52",
+    "client_name": "David Chen",
+    "company": "FinanceCore",
+    "bde_note": "Likely benchmarking against DataGuard",
+    "sales_stage": "EVALUATION",
+    "priority": "LOW",
+    "scheduled_followup_date": "05 Sep 2026",
+    "scheduled_followup_time": "11:00 AM",
+    "registered_at": "2026-09-21T10:35:55"
+  },
+  "a9340608": {
+    "id": "a9340608",
+    "client_name": "Priya Nair",
+    "company": "RetailMax",
+    "bde_note": "Wants revised pricing by today",
+    "sales_stage": "NEGOTIATION",
+    "priority": "HIGH",
+    "scheduled_followup_date": "21 Sep 2026",
+    "scheduled_followup_time": "2:00 PM - 4:00 PM",
+    "registered_at": "2026-09-21T10:36:08"
+  },
+  "ebe49155": {
+    "id": "ebe49155",
+    "client_name": "David Chen",
+    "company": "FinanceCore",
+    "bde_note": "Likely benchmarking against DataGuard",
+    "sales_stage": "EVALUATION",
+    "priority": "LOW",
+    "scheduled_followup_date": "05 Sep 2026",
+    "scheduled_followup_time": "11:00 AM",
+    "registered_at": "2026-09-21T10:36:31"
+  },
+  "33061264": {
+    "id": "33061264",
+    "client_name": "Priya Nair",
+    "company": "RetailMax",
+    "bde_note": "Wants revised pricing by today",
+    "sales_stage": "NEGOTIATION",
+    "priority": "HIGH",
+    "scheduled_followup_date": "21 Sep 2026",
+    "scheduled_followup_time": "2:00 PM - 4:00 PM",
+    "registered_at": "2026-09-21T10:36:54"
+  },
+  "d398e314": {
+    "id": "d398e314",
+    "client_name": "Rahul Singh",
+    "company": "NovaCorp",
+    "bde_note": "Board approval in progress",
+    "sales_stage": "DECISION",
+    "priority": "HIGH",
+    "scheduled_followup_date": "28 Sep 2026",
+    "scheduled_followup_time": "Morning",
+    "registered_at": "2026-09-21T10:36:57"
+  }
+}
