@@ -16,7 +16,9 @@ Design note:
 
 from datetime import datetime
 
-from services.reminder_service import ReminderStatus, compute_reminder
+from schemas.conversation_analysis import ReminderStatus
+from services.reminder_service import compute_reminder
+from services.utils import normalize_time_filter
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -58,12 +60,19 @@ def _dates_match(entry_date: str | None, search_date: str) -> bool:
 
 def _time_matches(entry_time: str, search_time: str | None) -> bool:
     """
-    Return True if the search_time appears in the entry_time string.
-    If search_time is None or 'Not specified', every entry matches (no filter).
+    Return True if search_time matches the entry_time.
+    If search_time is None or 'Not specified', every entry matches.
+    Uses exact equality (not substring) to prevent '1:00 pm' matching '11:00 pm'.
     """
     if not search_time or search_time.strip().lower() == "not specified":
         return True
-    return search_time.strip().lower() in (entry_time or "").lower()
+    needle     = normalize_time_filter(search_time)
+    stored_lc  = (entry_time or "").lower().strip()
+    if stored_lc == needle:
+        return True
+    if " - " in stored_lc:
+        return needle in [p.strip() for p in stored_lc.split(" - ")]
+    return False
 
 
 def _enrich(entry: dict) -> dict:

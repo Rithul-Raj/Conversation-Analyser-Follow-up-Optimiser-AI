@@ -156,7 +156,7 @@ async def health_check():
     tags=["Analysis"],
     summary="Analyse a sales conversation and return structured recommendations.",
 )
-async def analyze_conversation_endpoint(request: AnalyzeRequest):
+def analyze_conversation_endpoint(request: AnalyzeRequest):
     """
     Accepts a lead_id, bde_id, and sales conversation summary. Returns:
     - Current sales stage, priority, recommended action
@@ -171,6 +171,10 @@ async def analyze_conversation_endpoint(request: AnalyzeRequest):
     Past conversations for the same lead_id are automatically fetched and
     injected as context so the AI can account for evolving intent.
     Retries once if the LLM returns an invalid/malformed response.
+
+    Note: defined as a plain `def` (not async) so FastAPI runs it in a
+    thread-pool worker and the event loop is never blocked by the
+    synchronous Gemini and SQLite calls.
     """
     logger.info(
         "Received /analyze-conversation  lead_id=%s  bde_id=%s  (%d chars).",
@@ -180,6 +184,13 @@ async def analyze_conversation_endpoint(request: AnalyzeRequest):
     # Normalize IDs so LEAD001, lead-001, LEAD-001 all resolve to the same record
     lead_id = normalize_lead_id(request.lead_id)
     bde_id  = normalize_bde_id(request.bde_id)
+
+    # Reject IDs that normalize to an empty string (e.g. "###" or purely symbolic)
+    if not lead_id or not bde_id:
+        raise HTTPException(
+            status_code=422,
+            detail="lead_id and bde_id must contain at least one alphanumeric character.",
+        )
 
     # 1. Fetch past conversations for this lead (up to 5, oldest first)
     history = get_lead_history(lead_id, limit=5)
@@ -266,7 +277,7 @@ async def lead_history(lead_id: str, limit: int = 10):
     Use `limit` (default 10) to control how many are returned.
     """
     lead_id = normalize_lead_id(lead_id)   # normalise before DB lookup
-    history = get_lead_history(lead_id, limit=limit)
+    history = get_lead_history(lead_id, limit=limit, newest_first=True)
     if not history:
         raise HTTPException(
             status_code=404,
@@ -468,18 +479,13 @@ async def notifications_client(request: ClientRequest):
     tags=["Q&A"],
     summary="Ask any free-form question about a sales conversation.",
 )
-async def ask_conversation_endpoint(request: AskRequest):
+def ask_conversation_endpoint(request: AskRequest):
     """
     Accepts a conversation summary and ANY question the BDE wants to ask,
     and returns a plain-text answer.
 
-    Example questions:
-    - "What is the real motive of this conversation?"
-    - "Is the client price-sensitive or feature-sensitive?"
-    - "Did the client raise any technical concerns?"
-    - "What should I avoid saying in the next follow-up?"
-
-    This endpoint handles any reasonable question — there is no fixed list.
+    Defined as plain `def` so the synchronous Gemini call runs in a
+    thread-pool worker and does not block the event loop.
     """
     logger.info(
         "Received /ask-conversation request (%d chars, question: %s).",

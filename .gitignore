@@ -28,3 +28,6 @@ Thumbs.db
 # Database — local data, not for version control
 data/
 *.db
+
+# Leftover test data
+leads.json

@@ -9,7 +9,7 @@ scheduled_followup_time string, computes:
 """
 
 from datetime import date, datetime
-from enum import Enum
+from schemas.conversation_analysis import ReminderStatus
 
 
 # ---------------------------------------------------------------------------
@@ -18,13 +18,7 @@ from enum import Enum
 _DATE_FORMAT = "%d %b %Y"
 
 
-class ReminderStatus(str, Enum):
-    OVERDUE       = "OVERDUE"        # scheduled date has already passed
-    TODAY         = "TODAY"          # follow-up is today
-    TOMORROW      = "TOMORROW"       # follow-up is tomorrow
-    THIS_WEEK     = "THIS_WEEK"      # within 2–7 days
-    UPCOMING      = "UPCOMING"       # more than 7 days away
-    NOT_SCHEDULED = "NOT_SCHEDULED"  # no date was committed in the conversation
+# ReminderStatus is imported from schemas.conversation_analysis — single source of truth.
 
 
 class ReminderResult:

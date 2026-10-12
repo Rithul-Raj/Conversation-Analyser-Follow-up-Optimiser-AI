@@ -13,10 +13,11 @@ Design note:
 """
 
 import json
-import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+
+from services.utils import normalize_date_input, normalize_time_filter
 
 # ---------------------------------------------------------------------------
 # DB location
@@ -92,10 +93,19 @@ def save_conversation(
 # ---------------------------------------------------------------------------
 # Read
 # ---------------------------------------------------------------------------
-def get_lead_history(lead_id: str, limit: int = 5) -> list[dict]:
+def get_lead_history(
+    lead_id: str,
+    limit: int = 5,
+    newest_first: bool = False,
+) -> list[dict]:
     """
-    Return the most recent `limit` conversations for a lead, in
-    chronological order (oldest first) so the AI gets proper context flow.
+    Return up to `limit` conversations for a lead.
+
+    Args:
+        lead_id:      Normalised lead identifier.
+        limit:        Maximum number of conversations to return.
+        newest_first: If True, return newest→oldest (for display).
+                      If False (default), return oldest→newest (for AI context).
 
     Each item contains:
         id, lead_id, bde_id, conversation_text, analysis (dict), created_at
@@ -112,9 +122,10 @@ def get_lead_history(lead_id: str, limit: int = 5) -> list[dict]:
             (lead_id, limit),
         ).fetchall()
 
-    # Reverse so oldest → newest (chronological context for the AI)
+    # Default: reverse so oldest → newest (chronological context for the AI)
+    ordered = list(reversed(rows)) if not newest_first else list(rows)
     result = []
-    for row in reversed(rows):
+    for row in ordered:
         result.append({
             "id":                row["id"],
             "lead_id":           row["lead_id"],
@@ -145,52 +156,71 @@ def get_all_leads() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _normalize_time_filter(raw: str) -> str:
+def _time_matches(needle: str, stored: str) -> bool:
     """
-    Standardise a user-typed time filter so it matches stored times.
+    Check whether a normalised time needle matches a stored time string.
 
-    Handles the common mismatch where the user types "7 pm" but the
-    stored value is "7:00 PM".
+    Uses exact equality for single times and checks both ends of a range,
+    avoiding the substring collision where '1:00 pm' falsely matches '11:00 pm'.
 
-    Rules:
-      "7 pm"   → "7:00 pm"     (adds :00 when minutes are omitted)
-      "7PM"    → "7:00 pm"     (space-insensitive, lowercase)
-      "7:30pm" → "7:30 pm"     (adds space before am/pm)
-      "7:00 PM"→ "7:00 pm"     (already correct, just lowercased)
-      "morning"→ "morning"     (vague words pass through unchanged)
+    Examples:
+      _time_matches('7:00 pm', '7:00 PM')            → True
+      _time_matches('1:00 pm', '11:00 PM')            → False  (was True with substring)
+      _time_matches('2:00 pm', '2:00 PM - 4:00 PM')  → True   (range start)
+      _time_matches('morning', 'Morning')             → True
     """
-    t = raw.strip().lower()
-    # Insert :00 when hour is given with no minutes, e.g. "7 pm" or "7pm"
-    t = re.sub(r'^(\d{1,2})\s*(am|pm)$', r'\1:00 \2', t)
-    # Ensure space between time digits and am/pm, e.g. "7:30pm" → "7:30 pm"
-    t = re.sub(r'^(\d{1,2}:\d{2})\s*(am|pm)$', r'\1 \2', t)
-    return t
+    stored_lc = stored.lower().strip()
+    if stored_lc == needle:
+        return True
+    # Handle time ranges like "2:00 pm - 4:00 pm"
+    if " - " in stored_lc:
+        return needle in [p.strip() for p in stored_lc.split(" - ")]
+    return False
 
 
 def get_conversations_by_date(date_str: str, time_str: str | None = None) -> list[dict]:
     """
-    Search all stored conversations whose AI-extracted scheduled_followup_date
-    matches date_str (case-insensitive). Optionally narrow by time_str substring.
+    Find all leads whose LATEST scheduled_followup_date matches date_str.
+
+    Key design decisions:
+      - Only the most recent conversation per lead is checked, so a lead
+        that was rescheduled no longer appears under its old date.
+      - date_str is normalised to a zero-padded day so '5 Sep 2026' matches
+        the stored '05 Sep 2026'.
+      - Time matching uses exact equality (not substring) to prevent '1:00 pm'
+        from falsely matching '11:00 pm'.
 
     Returns a list of matching records (lead_id, bde_id, analysis, created_at).
-    This is used by the terminal CLI's 'Find by date' feature.
     """
-    needle_date = date_str.strip().lower()
-    needle_time = _normalize_time_filter(time_str) if time_str else None
+    needle_date = normalize_date_input(date_str).lower()
+    needle_time = normalize_time_filter(time_str) if time_str else None
 
     with _connect() as conn:
+        # Subquery: fetch only the most recent conversation per lead
         rows = conn.execute(
-            "SELECT lead_id, bde_id, analysis_json, created_at FROM conversations"
+            """
+            SELECT c.lead_id, c.bde_id, c.analysis_json, c.created_at
+            FROM   conversations c
+            INNER JOIN (
+                SELECT lead_id, MAX(created_at) AS max_ts
+                FROM   conversations
+                GROUP  BY lead_id
+            ) AS latest
+              ON c.lead_id   = latest.lead_id
+             AND c.created_at = latest.max_ts
+            """
         ).fetchall()
 
     results = []
     for row in rows:
-        analysis = json.loads(row["analysis_json"])
-        followup_date = (analysis.get("scheduled_followup_date") or "").strip().lower()
-        followup_time = (analysis.get("scheduled_followup_time") or "").lower()
+        analysis     = json.loads(row["analysis_json"])
+        stored_date  = normalize_date_input(
+            analysis.get("scheduled_followup_date") or ""
+        ).lower()
+        stored_time  = (analysis.get("scheduled_followup_time") or "")
 
-        if followup_date == needle_date:
-            if needle_time is None or needle_time in followup_time:
+        if stored_date == needle_date:
+            if needle_time is None or _time_matches(needle_time, stored_time):
                 results.append({
                     "lead_id":    row["lead_id"],
                     "bde_id":     row["bde_id"],

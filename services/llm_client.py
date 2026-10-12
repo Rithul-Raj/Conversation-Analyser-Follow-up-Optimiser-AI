@@ -20,7 +20,6 @@ from google.api_core.exceptions import ResourceExhausted
 
 from prompts.analysis_prompt import (
     ANALYSIS_SYSTEM_PROMPT,
-    build_analysis_prompt,
     build_analysis_prompt_with_history,
     build_retry_prompt,
 )
@@ -32,14 +31,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module-level Gemini configuration — runs once at import time.
 # ---------------------------------------------------------------------------
-_api_key = os.getenv("GEMINI_API_KEY", "")
-_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_api_key    = os.getenv("GEMINI_API_KEY", "")
+_model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 if _api_key:
     genai.configure(api_key=_api_key)
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=2)  # one entry per unique system prompt (analysis + Q&A)
 def _get_model(system_instruction: str) -> genai.GenerativeModel:
     """
     Return a cached GenerativeModel for the given system instruction.

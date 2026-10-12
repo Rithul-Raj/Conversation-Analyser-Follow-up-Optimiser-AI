@@ -27,8 +27,9 @@ from services.database import (
 )
 from services.followup_rules import get_follow_up_days
 from services.llm_client import analyze_conversation, ask_question
+from services.reminder_service import compute_reminder
 from services.toast_notifier import notify_if_due_today
-from services.utils import normalize_bde_id, normalize_lead_id
+from services.utils import normalize_bde_id, normalize_date_input, normalize_lead_id
 
 # ---------------------------------------------------------------------------
 # Display helpers
@@ -177,7 +178,11 @@ def do_analyse():
     print(" done.")
 
     follow_up_days = get_follow_up_days(result.priority)
-    conv_id = save_conversation(lead_id, bde_id, text, result.model_dump())
+    conv_id        = save_conversation(lead_id, bde_id, text, result.model_dump())
+    reminder       = compute_reminder(
+        result.scheduled_followup_date,
+        result.scheduled_followup_time,
+    )
 
     # ── Auto-notification: fires if follow-up is due today ────────────────
     notified = notify_if_due_today(
@@ -201,6 +206,7 @@ def do_analyse():
     field("Follow-up in",     f"{follow_up_days} day(s)")
     field("Sched. Date",      result.scheduled_followup_date or "Not specified")
     field("Sched. Time",      result.scheduled_followup_time)
+    field("Reminder",         f"{reminder.status.value}  ({reminder.days_remaining if reminder.days_remaining is not None else 'N/A'} day(s))")
     field("History Used",     f"{len(history)} past conversation(s)")
     field("Saved as",         f"Conversation #{conv_id}")
 
@@ -315,10 +321,8 @@ def do_find_by_date():
     if not date_str:
         print("\n  ERROR: Date is required.")
         return
-    # Normalize month capitalisation e.g. "24 sep 2026" → "24 Sep 2026"
-    parts = date_str.split()
-    if len(parts) == 3:
-        date_str = f"{parts[0]} {parts[1].capitalize()} {parts[2]}"
+    # Normalize: capitalize month, zero-pad day ("5 Sep" → "05 Sep 2026")
+    date_str = normalize_date_input(date_str)
 
     time_str = input("  Time filter (optional, press Enter to skip): ").strip() or None
 

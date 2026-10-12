@@ -42,3 +42,49 @@ def normalize_lead_id(raw: str) -> str:
 def normalize_bde_id(raw: str) -> str:
     """Same normalisation rules as normalize_lead_id."""
     return normalize_lead_id(raw)
+
+
+def normalize_time_filter(raw: str) -> str:
+    """
+    Standardise a user-typed time filter so it matches AI-extracted times.
+
+    Handles the common mismatch where the user types "7 pm" but the
+    stored value is "7:00 PM".
+
+    Rules (applied in order):
+      "7 pm"    → "7:00 pm"      (adds :00 when minutes are omitted)
+      "7PM"     → "7:00 pm"      (space-insensitive, lowercase)
+      "7:30pm"  → "7:30 pm"      (adds space before am/pm)
+      "7:00 PM" → "7:00 pm"      (already correct, just lowercased)
+      "morning" → "morning"      (vague words pass through unchanged)
+    """
+    t = raw.strip().lower()
+    # Insert :00 when hour is given with no minutes, e.g. "7 pm" or "7pm"
+    t = re.sub(r'^(\d{1,2})\s*(am|pm)$', r'\1:00 \2', t)
+    # Ensure space between digits and am/pm, e.g. "7:30pm" → "7:30 pm"
+    t = re.sub(r'^(\d{1,2}:\d{2})\s*(am|pm)$', r'\1 \2', t)
+    return t
+
+
+def normalize_date_input(raw: str) -> str:
+    """
+    Ensure a 'DD Mon YYYY' date string has a zero-padded day.
+
+    The AI always stores dates with a 2-digit day ("05 Sep 2026"), but
+    users naturally type single-digit days ("5 Sep 2026"). This function
+    makes both forms identical before comparison.
+
+    Examples:
+      "5 Sep 2026"  → "05 Sep 2026"
+      "05 Sep 2026" → "05 Sep 2026"
+      "12 Oct 2026" → "12 Oct 2026"
+    """
+    parts = raw.strip().split()
+    if len(parts) == 3:
+        try:
+            day = int(parts[0])
+            return f"{day:02d} {parts[1].capitalize()} {parts[2]}"
+        except ValueError:
+            pass
+    return raw.strip()
+

@@ -133,8 +133,8 @@ class LLMAnalysisOutput(BaseModel):
     @field_validator("client_pain_points", "client_recommendations")
     @classmethod
     def check_item_length(cls, v: List[str]) -> List[str]:
-        """Silently drop any item exceeding 150 characters."""
-        return [item for item in v if len(item) <= 150]
+        """Silently drop any item exceeding 15 words (matches the prompt specification)."""
+        return [item for item in v if len(item.split()) <= 15]
 
 
 class ConversationAnalysisResponse(LLMAnalysisOutput):

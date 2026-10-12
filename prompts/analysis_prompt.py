@@ -24,7 +24,7 @@ Schema:
   "conversation_mode":        one of [PROFESSIONAL, CASUAL, TECHNICAL],
   "motive_summary":           a single sentence describing the real intent or motive behind the conversation,
   "scheduled_followup_date":  a concrete calendar date string like "24 Sep 2026", or null,
-  "scheduled_followup_time":  a time string like "3:00 PM" or "10:30 AM IST", or null,
+  "scheduled_followup_time":  a time string (ALWAYS a string, never null) — see RULE 1-4 below,
   "client_pain_points":       a JSON array of short strings (each <15 words) — problems/frustrations the CLIENT explicitly stated,
   "client_recommendations":   a JSON array of short strings (each <15 words) — suggestions/requests the CLIENT explicitly made
 }
@@ -166,7 +166,8 @@ def build_retry_prompt(conversation_text: str, previous_response: str, today_dat
         f"Try again. Return ONLY valid JSON with the exact enum values specified. "
         f"No markdown, no explanation.\n"
         f"Remember:\n"
-        f"  - scheduled_followup_date and scheduled_followup_time must be a string or null — never omit them.\n"
+        f"  - scheduled_followup_date must be a string in 'DD Mon YYYY' format, or null if no date was committed.\n"
+        f"  - scheduled_followup_time must ALWAYS be a string (never null) — use 'Not specified' if no time was mentioned.\n"
         f"  - client_pain_points and client_recommendations must be JSON arrays (use [] if empty) — never omit them.\n\n"
         f"Today's date: {today_date}\n"
         f"Conversation:\n{conversation_text.strip()}"
