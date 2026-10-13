@@ -3,7 +3,7 @@ Shared utility functions used by both cli.py and main.py.
 """
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -92,17 +92,11 @@ def normalize_date_input(raw: str) -> str:
     return raw.strip()
 
 
-def get_today():
-    """
-    Return today's date in the project timezone.
-
-    Reads the TIMEZONE environment variable (default: Asia/Kolkata / IST).
-    This ensures reminders, AI prompts, and date searches are all consistent,
-    even when the server clock is UTC (e.g. on a Linux host).
-    """
+def get_today() -> date:
+    """Return today's date in the project timezone (TIMEZONE env var, default Asia/Kolkata)."""
     tz_name = os.getenv("TIMEZONE", "Asia/Kolkata")
     try:
         tz = ZoneInfo(tz_name)
     except Exception:
-        tz = ZoneInfo("Asia/Kolkata")
+        tz = timezone(timedelta(hours=5, minutes=30))  # IST fixed offset fallback
     return datetime.now(tz=tz).date()

@@ -7,3 +7,4 @@ requests==2.32.3
 pytest==9.1.1
 httpx==0.28.1
 winotify==1.1.0 ; sys_platform == "win32"
+tzdata
