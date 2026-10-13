@@ -5,6 +5,7 @@ These enums define the ONLY valid values accepted from the LLM.
 Any value outside these enums is rejected and triggers a retry.
 """
 
+from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator
@@ -129,6 +130,35 @@ class LLMAnalysisOutput(BaseModel):
             "Only explicit client statements. Empty list if none."
         ),
     )
+
+    @field_validator("scheduled_followup_date", mode="before")
+    @classmethod
+    def normalise_date_format(cls, v: object) -> str | None:
+        """
+        Normalise the AI-returned date to 'DD Mon YYYY' format.
+
+        The prompt asks for 'DD Mon YYYY', but the AI occasionally returns
+        other formats (e.g. '20 October 2026', '2026-10-20', 'Oct 20, 2026').
+        This validator converts any recognised format so downstream code
+        (date search, reminder computation) always sees the canonical form.
+        """
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return None
+        for fmt in (
+            "%d %b %Y",      # 20 Oct 2026   (canonical)
+            "%d %B %Y",      # 20 October 2026
+            "%Y-%m-%d",      # 2026-10-20
+            "%B %d, %Y",     # October 20, 2026
+            "%d/%m/%Y",      # 20/10/2026
+            "%m/%d/%Y",      # 10/20/2026
+        ):
+            try:
+                return datetime.strptime(v.strip(), fmt).strftime("%d %b %Y")
+            except ValueError:
+                continue
+        return v  # return as-is; schema enforcement will handle the rest
 
     @field_validator("client_pain_points", "client_recommendations")
     @classmethod

@@ -23,22 +23,24 @@ from dotenv import load_dotenv
 # Load .env before anything else so GEMINI_API_KEY is available to all modules.
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from google.api_core.exceptions import ResourceExhausted
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Ensure local packages resolve correctly when running from project root.
 sys.path.insert(0, os.path.dirname(__file__))
 
 from schemas.conversation_analysis import ConversationAnalysisResponse, Reminder
-from services.database import get_all_leads, get_lead_history, init_db, save_conversation
+from services.database import (
+    get_all_leads, get_conversations_by_date,
+    get_lead_history, init_db, save_conversation,
+)
 from services.followup_rules import get_follow_up_days
-from services.llm_client import analyze_conversation, ask_question
+from services.llm_client import RateLimitError, analyze_conversation, ask_question
 from services.reminder_service import compute_reminder
 from services.notification_service import filter_by_date, get_daily_summary, find_by_client
-from services.utils import normalize_bde_id, normalize_lead_id
+from services.utils import normalize_bde_id, normalize_date_input, normalize_lead_id
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -87,7 +89,7 @@ app.add_middleware(
 class AnalyzeRequest(BaseModel):
     lead_id: str = Field(
         ...,
-        description="Unique identifier for the lead (e.g. 'LEAD-001', CRM ID, phone number).",
+        description="Unique identifier for the lead (e.g. 'LEAD-001', CRM ID).",
         examples=["LEAD-001"],
     )
     bde_id: str = Field(
@@ -99,8 +101,15 @@ class AnalyzeRequest(BaseModel):
         ...,
         min_length=20,
         description="Full conversation summary pasted by the BDE after a client call.",
-        examples=["Client called asking about our enterprise pricing. Very interested in API integration..."],
+        examples=["Client called asking about our enterprise pricing..."],
     )
+
+    @field_validator("conversation_text", mode="after")
+    @classmethod
+    def must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("conversation_text must not be blank or whitespace-only.")
+        return v
 
 
 class AskRequest(BaseModel):
@@ -116,17 +125,24 @@ class AskRequest(BaseModel):
         examples=["Is the client price-sensitive or feature-sensitive?"],
     )
 
+    @field_validator("conversation_text", "question", mode="after")
+    @classmethod
+    def must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Field must not be blank or whitespace-only.")
+        return v
+
 
 class AskResponse(BaseModel):
     answer: str = Field(..., description="Plain-text answer from the AI.")
 
 
 # ---------------------------------------------------------------------------
-# Exception handler — Gemini rate limit
+# Exception handlers
 # ---------------------------------------------------------------------------
-@app.exception_handler(ResourceExhausted)
-async def rate_limit_handler(request: Request, exc: ResourceExhausted):
-    logger.warning("Gemini rate limit hit: %s", exc)
+@app.exception_handler(RateLimitError)
+async def rate_limit_handler(request: Request, exc: RateLimitError):
+    logger.warning("Gemini rate limit hit.")
     return JSONResponse(
         status_code=429,
         content={
@@ -134,6 +150,18 @@ async def rate_limit_handler(request: Request, exc: ResourceExhausted):
                 "The AI service rate limit has been reached. "
                 "Please wait a moment and try again."
             )
+        },
+    )
+
+
+@app.exception_handler(EnvironmentError)
+async def env_error_handler(request: Request, exc: EnvironmentError):
+    logger.error("Server configuration error: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Server configuration error: GEMINI_API_KEY is not set. "
+                      "Contact the server administrator."
         },
     )
 
@@ -199,7 +227,9 @@ def analyze_conversation_endpoint(request: AnalyzeRequest):
     # 2. Call AI with history-aware prompt
     try:
         llm_output = analyze_conversation(request.conversation_text, history=history)
-    except ResourceExhausted:
+    except RateLimitError:
+        raise
+    except EnvironmentError:
         raise
     except ValueError as exc:
         raise HTTPException(
@@ -264,19 +294,42 @@ async def list_leads():
 
 
 @app.get(
+    "/leads/due-today",
+    tags=["Lead History"],
+    summary="Get all leads whose latest scheduled follow-up date is today.",
+)
+async def leads_due_today():
+    """
+    Pure Python — no AI, no API cost, instant response.
+
+    Returns all leads whose LATEST stored conversation has a
+    scheduled_followup_date matching today's date. Results include
+    the full analysis block for each matching lead.
+
+    Useful for the backend to display a daily dashboard of leads
+    that need attention today.
+    """
+    from datetime import date as _date
+    today_str = _date.today().strftime("%d %b %Y")
+    results = get_conversations_by_date(today_str)
+    return results
+
+
+@app.get(
     "/leads/{lead_id}/history",
     tags=["Lead History"],
     summary="Get full conversation history for a specific lead.",
 )
-async def lead_history(lead_id: str, limit: int = 10):
+async def lead_history(
+    lead_id: str,
+    limit: int = Query(default=10, ge=1, le=100, description="Number of conversations to return (1-100)."),
+):
     """
-    Returns all stored conversations for the given lead_id, most recent first.
+    Returns stored conversations for the given lead_id, newest first.
     Each item includes the original conversation text, the full AI analysis,
     and the BDE who handled it.
-
-    Use `limit` (default 10) to control how many are returned.
     """
-    lead_id = normalize_lead_id(lead_id)   # normalise before DB lookup
+    lead_id = normalize_lead_id(lead_id)
     history = get_lead_history(lead_id, limit=limit, newest_first=True)
     if not history:
         raise HTTPException(
@@ -495,8 +548,10 @@ def ask_conversation_endpoint(request: AskRequest):
 
     try:
         answer = ask_question(request.conversation_text, request.question)
-    except ResourceExhausted:
+    except RateLimitError:
         raise  # handled by the exception handler above
+    except EnvironmentError:
+        raise
     except RuntimeError as exc:
         logger.error("LLM call failed: %s", exc)
         raise HTTPException(

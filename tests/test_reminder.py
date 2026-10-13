@@ -1,52 +1,88 @@
-"""Test the /reminder-status endpoint and the reminder block in /analyze-conversation."""
-import json
-import time
-import requests
+"""
+tests/test_reminder.py
+-----------------------
+Tests for reminder status computation logic.
+Runs completely offline — no Gemini key or running server required.
 
-BASE = "http://localhost:8000"
+Usage:
+    pytest tests/test_reminder.py -v
+    # or run directly:
+    python tests/test_reminder.py
+"""
+import sys
+sys.path.insert(0, ".")
 
-def test_reminder_endpoint():
-    print("\n=== POST /reminder-status (pure Python, no AI) ===\n")
-    cases = [
-        ("UPCOMING",       {"scheduled_followup_date": "24 Sep 2026", "scheduled_followup_time": "11:00 AM"}),
-        ("TODAY",          {"scheduled_followup_date": "10 Sep 2026", "scheduled_followup_time": "Morning"}),
-        ("TOMORROW",       {"scheduled_followup_date": "11 Sep 2026", "scheduled_followup_time": "2:00 PM - 4:00 PM"}),
-        ("THIS_WEEK",      {"scheduled_followup_date": "14 Sep 2026", "scheduled_followup_time": "Not specified"}),
-        ("OVERDUE",        {"scheduled_followup_date": "05 Sep 2026", "scheduled_followup_time": "3:00 PM"}),
-        ("NOT_SCHEDULED",  {"scheduled_followup_date": None,          "scheduled_followup_time": "Not specified"}),
-    ]
-    for label, payload in cases:
-        r = requests.post(f"{BASE}/reminder-status", json=payload, timeout=5)
-        d = r.json()
-        print(f"[{label}] HTTP {r.status_code}")
-        print(f"  status          : {d.get('status')}")
-        print(f"  days_remaining  : {d.get('days_remaining')}")
-        print(f"  reminder_message: {d.get('reminder_message', d.get('detail'))}")
-        print()
+from datetime import date, timedelta
 
-def test_analyze_with_reminder():
-    print("\n=== POST /analyze-conversation (reminder block included) ===\n")
-    conv = (
-        "Called Rahul Singh, VP Sales at NovaCorp. He liked the demo and is ready to move forward. "
-        "He asked us to call him back in exactly 2 weeks to finalise pricing. "
-        "He specifically said to call at 11 AM on that day."
-    )
-    r = requests.post(f"{BASE}/analyze-conversation", json={"conversation_text": conv}, timeout=30)
-    if r.status_code == 200:
-        d = r.json()
-        print("  scheduled_followup_date:", d.get("scheduled_followup_date"))
-        print("  scheduled_followup_time:", d.get("scheduled_followup_time"))
-        print("  reminder block:")
-        rem = d.get("reminder", {})
-        print("    status          :", rem.get("status"))
-        print("    days_remaining  :", rem.get("days_remaining"))
-        print("    reminder_message:", rem.get("reminder_message"))
-    else:
-        print(f"  HTTP {r.status_code}: {r.text[:200]}")
+from schemas.conversation_analysis import ReminderStatus
+from services.reminder_service import compute_reminder
+
+
+def _date_str(delta_days: int) -> str:
+    """Return a date string (DD Mon YYYY) relative to today."""
+    d = date.today() + timedelta(days=delta_days)
+    return d.strftime("%d %b %Y")
+
+
+CASES = [
+    # (label,            scheduled_date,       expected_status)
+    ("TODAY",          _date_str(0),           ReminderStatus.TODAY),
+    ("TOMORROW",       _date_str(1),           ReminderStatus.TOMORROW),
+    ("THIS_WEEK+2",    _date_str(2),           ReminderStatus.THIS_WEEK),
+    ("THIS_WEEK+7",    _date_str(7),           ReminderStatus.THIS_WEEK),
+    ("UPCOMING",       _date_str(8),           ReminderStatus.UPCOMING),
+    ("OVERDUE-1",      _date_str(-1),          ReminderStatus.OVERDUE),
+    ("OVERDUE-10",     _date_str(-10),         ReminderStatus.OVERDUE),
+    ("NOT_SCHEDULED",  None,                   ReminderStatus.NOT_SCHEDULED),
+]
+
+
+def test_reminder_statuses():
+    """pytest-compatible: all status computations are correct."""
+    for label, date_str, expected_status in CASES:
+        result = compute_reminder(date_str, "Not specified")
+        assert result.status == expected_status, (
+            f"[{label}] Expected {expected_status}, got {result.status} "
+            f"(date={date_str})"
+        )
+
+
+def test_today_days_remaining():
+    result = compute_reminder(_date_str(0), "11:00 AM")
+    assert result.days_remaining == 0
+
+
+def test_tomorrow_days_remaining():
+    result = compute_reminder(_date_str(1), "Not specified")
+    assert result.days_remaining == 1
+
+
+def test_overdue_days_remaining_negative():
+    result = compute_reminder(_date_str(-5), "3:00 PM")
+    assert result.days_remaining is not None and result.days_remaining < 0
+
+
+def test_not_scheduled_has_no_days():
+    result = compute_reminder(None, "Not specified")
+    assert result.days_remaining is None
+
+
+def test_reminder_message_non_empty():
+    """Every case must produce a non-empty message."""
+    for label, date_str, _ in CASES:
+        result = compute_reminder(date_str, "Not specified")
+        assert result.reminder_message, f"[{label}] reminder_message is empty"
+
 
 if __name__ == "__main__":
-    test_reminder_endpoint()
-    print("Waiting 5s before AI call...")
-    time.sleep(5)
-    test_analyze_with_reminder()
-    print("\nDone.")
+    print("\nReminder status tests\n" + "─" * 50)
+    all_ok = True
+    for label, date_str, expected in CASES:
+        result = compute_reminder(date_str, "Not specified")
+        ok = result.status == expected
+        status = "OK  " if ok else "FAIL"
+        print(f"  {status}  [{label:<16}]  got={result.status.value:<14}  expected={expected.value}")
+        if not ok:
+            all_ok = False
+    print()
+    print("All passed." if all_ok else "SOME TESTS FAILED.")

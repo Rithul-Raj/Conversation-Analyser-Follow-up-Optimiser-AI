@@ -1,12 +1,13 @@
 """
-Gemini API client with retry logic and schema validation.
+Gemini API client — uses the google-genai SDK (replaces google-generativeai).
 
 Responsibilities:
   1. Call the Gemini API with a system + user prompt.
   2. Parse and validate the JSON response against the Pydantic schema.
   3. Retry exactly once if the response is malformed or contains invalid enum values.
   4. Raise a clear exception if both attempts fail — never return bad data silently.
-  5. Handle Gemini rate-limit errors (429) gracefully.
+  5. Surface rate-limit errors as RateLimitError so main.py can return HTTP 429.
+  6. Raise EnvironmentError early (with a clear message) if the API key is missing.
 """
 
 import json
@@ -15,8 +16,8 @@ import os
 from datetime import date
 from functools import lru_cache
 
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
+from google import genai
+from google.genai import types
 
 from prompts.analysis_prompt import (
     ANALYSIS_SYSTEM_PROMPT,
@@ -29,62 +30,74 @@ from schemas.conversation_analysis import LLMAnalysisOutput
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module-level Gemini configuration — runs once at import time.
+# Custom exception — raised when Gemini returns HTTP 429
+# ---------------------------------------------------------------------------
+class RateLimitError(Exception):
+    """Raised when the Gemini API rate limit is exceeded."""
+
+
+# ---------------------------------------------------------------------------
+# Module-level config — read once at import time
 # ---------------------------------------------------------------------------
 _api_key    = os.getenv("GEMINI_API_KEY", "")
-_model_name = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
-
-if _api_key:
-    genai.configure(api_key=_api_key)
+_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 
-@lru_cache(maxsize=2)  # one entry per unique system prompt (analysis + Q&A)
-def _get_model(system_instruction: str) -> genai.GenerativeModel:
+@lru_cache(maxsize=1)
+def _get_client() -> genai.Client:
     """
-    Return a cached GenerativeModel for the given system instruction.
-    lru_cache ensures we only ever create at most 4 distinct model objects
-    (one per unique system prompt) — never recreating them on each request.
+    Return a cached Gemini client.
+    Raises EnvironmentError immediately if the API key is not set,
+    so the error surfaces at request time with a clear message.
     """
     if not _api_key:
         raise EnvironmentError(
             "GEMINI_API_KEY is not set. Add it to your .env file."
         )
-    return genai.GenerativeModel(
-        model_name=_model_name,
-        system_instruction=system_instruction,
-        generation_config=genai.GenerationConfig(temperature=0.2),
-    )
+    return genai.Client(api_key=_api_key)
 
 
-def _call_gemini(model: genai.GenerativeModel, user_message: str) -> str:
+def _call_gemini(system_instruction: str, user_message: str) -> str:
     """
     Send a single user message to Gemini and return the raw text response.
 
     Raises:
-        ResourceExhausted: Propagated as-is — caught upstream and converted to
-                           a user-friendly HTTP 429 response.
-        RuntimeError: For any other unexpected Gemini error.
+        EnvironmentError   : API key not configured.
+        RateLimitError     : Gemini returned HTTP 429.
+        RuntimeError       : Any other Gemini error.
     """
     try:
-        response = model.generate_content(user_message)
+        client = _get_client()
+        response = client.models.generate_content(
+            model=_model_name,
+            contents=user_message,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.2,
+            ),
+        )
         return response.text.strip()
-    except ResourceExhausted:
-        raise  # handled in the route handler
+    except EnvironmentError:
+        raise  # propagate missing-key error as-is
     except Exception as exc:
+        # Detect rate limit by inspecting exception class name or message
+        exc_type = type(exc).__name__
+        exc_str  = str(exc)
+        if "429" in exc_str or "quota" in exc_str.lower() or "rate" in exc_str.lower() or "ResourceExhausted" in exc_type:
+            raise RateLimitError(
+                "The Gemini API rate limit has been reached. Please wait and try again."
+            ) from exc
         raise RuntimeError(f"Gemini API call failed: {exc}") from exc
 
 
 def _parse_llm_json(raw_text: str) -> dict:
     """
     Extract and parse JSON from the LLM response.
-    Handles the common case where the model wraps JSON in markdown fences
-    despite being told not to.
+    Handles the common case where the model wraps JSON in markdown fences.
     """
     text = raw_text.strip()
-    # Strip markdown fences if present
     if text.startswith("```"):
         lines = text.splitlines()
-        # Drop opening fence line and closing fence line
         inner = [
             line for line in lines[1:]
             if not line.strip().startswith("```")
@@ -100,14 +113,10 @@ def analyze_conversation(
     """
     Send conversation text to Gemini and return a validated LLMAnalysisOutput.
 
-    When `history` is provided (non-empty list of past conversation dicts from
-    the database), the prompt includes a compact summary of those interactions
-    as context so the AI can account for the lead's evolving intent.
-
     Strategy:
       - Attempt 1: standard (or history-aware) analysis prompt.
-      - Attempt 2 (only if attempt 1 fails validation): retry prompt that
-        references the invalid response and re-emphasises constraints.
+      - Attempt 2 (only if attempt 1 fails): retry prompt that includes the
+        invalid response and re-emphasises constraints.
       - If both fail: raise ValueError with a clear message.
 
     Args:
@@ -119,20 +128,19 @@ def analyze_conversation(
         A validated LLMAnalysisOutput instance.
 
     Raises:
-        ResourceExhausted: Gemini rate limit hit.
-        ValueError: Both attempts produced invalid responses.
-        RuntimeError: Unexpected Gemini API failure.
+        EnvironmentError : API key not configured.
+        RateLimitError   : Gemini rate limit hit.
+        ValueError       : Both attempts produced invalid responses.
+        RuntimeError     : Unexpected Gemini API failure.
     """
-    model      = _get_model(ANALYSIS_SYSTEM_PROMPT)
     today_date = date.today().strftime("%d %b %Y")
 
-    # Use history-aware prompt if past conversations exist
     user_message = build_analysis_prompt_with_history(
         conversation_text, today_date, history or []
     )
 
-    for attempt in range(1, 3):  # max 2 attempts
-        raw = _call_gemini(model, user_message)
+    for attempt in range(1, 3):   # max 2 attempts
+        raw = _call_gemini(ANALYSIS_SYSTEM_PROMPT, user_message)
         logger.debug("Gemini raw response (attempt %d): %s", attempt, raw[:500])
 
         try:
@@ -142,11 +150,10 @@ def analyze_conversation(
             return result
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning(
-                "Attempt %d validation failed: %s. Raw response: %s",
+                "Attempt %d validation failed: %s. Raw: %s",
                 attempt, exc, raw[:300],
             )
             if attempt == 1:
-                # Retry with a corrective prompt (no history — keep it short)
                 user_message = build_retry_prompt(conversation_text, raw, today_date)
             else:
                 raise ValueError(
@@ -154,7 +161,6 @@ def analyze_conversation(
                     f"Last raw response: {raw[:300]}"
                 ) from exc
 
-    # Unreachable, but satisfies type checkers
     raise ValueError("analyze_conversation: exhausted all retry attempts.")
 
 
@@ -162,20 +168,13 @@ def ask_question(conversation_text: str, question: str) -> str:
     """
     Answer any free-form question about a conversation using Gemini.
 
-    This is a single, non-retried LLM call. Schema validation is not required
-    because the output is plain text, not a structured object.
-
-    Args:
-        conversation_text: The raw conversation summary from the BDE.
-        question: Any arbitrary question the BDE wants answered.
-
-    Returns:
-        A plain-text answer from the LLM.
+    Single call — no retry needed because output is plain text, not a
+    structured object.
 
     Raises:
-        ResourceExhausted: Gemini rate limit hit.
-        RuntimeError: Unexpected Gemini API failure.
+        EnvironmentError : API key not configured.
+        RateLimitError   : Gemini rate limit hit.
+        RuntimeError     : Unexpected Gemini API failure.
     """
-    model = _get_model(QA_SYSTEM_PROMPT)
     user_message = build_qa_prompt(conversation_text, question)
-    return _call_gemini(model, user_message)
+    return _call_gemini(QA_SYSTEM_PROMPT, user_message)
