@@ -486,9 +486,9 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ### 6. Run the offline test suite (no API key needed)
 ```
-pytest tests/test_normalize.py tests/test_reminder.py tests/test_api.py -v
+pytest tests/ -v
 ```
-Expected output: **32 passed**
+Expected output: **43 passed**
 
 ---
 
