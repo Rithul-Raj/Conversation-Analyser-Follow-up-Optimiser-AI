@@ -46,7 +46,7 @@ class RateLimitError(Exception):
 # Module-level config
 # ---------------------------------------------------------------------------
 _api_key    = os.getenv("GEMINI_API_KEY", "")
-_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+_model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 
 @lru_cache(maxsize=1)

@@ -52,7 +52,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 Optional:
 ```
-GEMINI_MODEL=gemini-2.5-flash-lite   # default — change if you prefer another model
+GEMINI_MODEL=gemini-3.5-flash-lite   # default — change if you prefer another model
 TIMEZONE=Asia/Kolkata                # default — set to your server's local timezone
 ```
 
@@ -130,7 +130,7 @@ python tests/test_notifications.py
 | Decision | Reason |
 |---|---|
 | **`google-genai` SDK** (not `google-generativeai`) | `google-generativeai` is end-of-life (Nov 2025) |
-| **Default model: `gemini-2.5-flash-lite`** | No announced shutdown date; configurable via `GEMINI_MODEL` |
+| **Default model: `gemini-3.5-flash-lite`** | High free-tier quota, fast response time; configurable via `GEMINI_MODEL` |
 | **Sync FastAPI endpoints for AI calls** | Prevents event-loop blocking during 3–8s Gemini latency |
 | **Local SQLite** | Zero-config for development; replace with PostgreSQL for multi-user |
 | **TIMEZONE env variable** | Server clocks are often UTC; without this, IST reminders are off by 5h30m |
@@ -146,5 +146,5 @@ python tests/test_notifications.py
 | Variable | Default | Description |
 |---|---|---|
 | `GEMINI_API_KEY` | *(required)* | Your Google Gemini API key |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model to use for all AI calls |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini model to use for all AI calls |
 | `TIMEZONE` | `Asia/Kolkata` | Timezone for "today" calculations. Use any IANA timezone string. |
