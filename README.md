@@ -1,178 +1,150 @@
-# Conversation Intelligence AI
+# FollowUp AI — Conversation Analyser & Follow-up Optimiser
 
-An AI-powered terminal tool for Business Development Executives (BDEs) to analyse sales conversations, track lead follow-ups, and query stored conversation history — all from a simple numbered menu.
-
----
-
-## What it does
-
-| Feature | Description |
-|---|---|
-| Analyse a conversation | Paste a conversation summary; AI extracts sales stage, priority, recommended action, follow-up date/time, client pain points, and key motives |
-| Ask a question | Ask any free-form question about a conversation (paste it or load a stored lead's history) |
-| Find leads by date | Search all stored leads scheduled for a specific date and optional time |
-| Lead history | View all past conversations and AI analysis for any lead |
-| List all leads | See every lead on record with conversation count and last contact date |
-
-All conversation data and analysis results are saved automatically in a local SQLite database. Each new analysis for the same lead automatically uses its past conversations as context.
+An AI-powered system for B2B sales teams that analyses sales conversation summaries and returns structured, actionable intelligence: sales stage, priority, recommended next action, follow-up schedule, client pain points, and more.
 
 ---
 
-## Requirements
+## API Documentation
 
-- Python 3.11 or higher
-- A free Gemini API key from [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
+→ **[API.md](API.md)** — Full endpoint reference with sample request/response JSON for every endpoint, error shapes, and integration notes.
+
+Swagger UI is also available at **http://localhost:8000/docs** when the server is running.
 
 ---
 
-## Setup
+## Quick Start
 
-### 1. Install dependencies
-
-Open a terminal, navigate to the `conversation_ai/` folder, and run:
-
+### 1. Clone the repository
 ```
+git clone https://github.com/Rithul-Raj/Conversation-Analyser-Follow-up-Optimiser-AI.git
+cd Conversation-Analyser-Follow-up-Optimiser-AI
+```
+
+> ⚠️ The project files are in the repo root — there is **no** `conversation_ai/` sub-folder to navigate into.
+
+### 2. Create a virtual environment
+```bash
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# Linux / Mac
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Add your API key
+### 4. Configure environment variables
 
-Create a file named `.env` inside the `conversation_ai/` folder with this content:
-
-```
-GEMINI_API_KEY=your_key_here
-GEMINI_MODEL=gemini-2.0-flash-lite
+Copy `.env.example` to `.env` and fill in your values:
+```bash
+cp .env.example .env
 ```
 
-Replace `your_key_here` with the key you copied from Google AI Studio.
-
----
-
-## Running the tool
-
-From inside the `conversation_ai/` folder, run:
-
+Required:
 ```
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+Optional:
+```
+GEMINI_MODEL=gemini-2.5-flash-lite   # default — change if you prefer another model
+TIMEZONE=Asia/Kolkata                # default — set to your server's local timezone
+```
+
+Get a free Gemini API key at: https://aistudio.google.com/app/apikey
+
+### 5. Run the API server
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 6. Or use the terminal interface (CLI)
+```bash
 python cli.py
 ```
 
-You will see the main menu:
-
-```
-============================================================
-     Conversation Intelligence AI  -  BDE Terminal
-============================================================
-
-  1   Analyse a conversation
-  2   Ask a question about a conversation
-  3   Find leads scheduled on a specific date
-  4   View conversation history for a lead
-  5   List all leads
-  0   Exit
-
-Choose (0-5):
-```
-
-Type a number and press Enter.
-
 ---
 
-## Menu guide
+## Run the Offline Test Suite
 
-### 1 — Analyse a conversation
+No API key needed. No server needed.
 
-Enter the Lead ID, your BDE ID, then paste the conversation. Type `END` on a new line when done.
-
-- If the Lead ID already exists, you will see a warning showing the last entry so you can confirm it is the right lead before continuing.
-- The AI analyses the current conversation with full awareness of all past conversations for that lead.
-- Result is saved automatically.
-
-**Lead ID format:** Use any consistent format — the tool normalises it automatically.  
-`LEAD001`, `lead-001`, `Lead_001` all resolve to the same stored record: `LEAD-001`.
-
-Example output fields:
+```bash
+pytest tests/test_normalize.py tests/test_reminder.py tests/test_api.py -v
 ```
-Sales Stage   : EVALUATION
-Priority      : HIGH
-Recommended   : SEND_DOCUMENTATION
-Mode          : PROFESSIONAL
-Follow-up in  : 1 day(s)
-Sched. Date   : 28 Sep 2026
-Sched. Time   : 11:00 AM
-History Used  : 2 past conversation(s)
-Saved as      : Conversation #7
+
+Expected output: **44 passed** (or similar).
+
+The three live-server test scripts (`test_date_extraction.py`, `test_notifications.py`, `test_pain_points.py`) require a running server and a live Gemini API key. Run them manually:
+```bash
+uvicorn main:app --reload
+python tests/test_notifications.py
 ```
 
 ---
 
-### 2 — Ask a question about a conversation
-
-Choose one of two modes when prompted:
-
-- **A — Paste conversation manually**: Paste any conversation text, then type your question.
-- **B — Use a stored lead**: Enter the Lead ID. All stored conversations for that lead are loaded and a preview is shown. Then type your question — the AI answers based on the full history.
-
----
-
-### 3 — Find leads scheduled on a specific date
-
-Enter a date in the format `24 Sep 2026`. Optionally enter a time filter (e.g. `11:00 AM`). The tool searches all stored leads whose AI-extracted follow-up date matches.
-
----
-
-### 4 — View conversation history for a lead
-
-Enter a Lead ID to see all past conversations with dates, BDE IDs, AI analysis summaries, and pain points.
-
----
-
-### 5 — List all leads
-
-Displays a table of all leads with their total conversation count and date of last contact.
-
----
-
-## Data storage
-
-All data is stored locally in:
+## Project Structure
 
 ```
-conversation_ai/data/conversations.db
-```
-
-This is a standard SQLite database file. To browse it visually, install the **SQLite Viewer** extension in VS Code or download **DB Browser for SQLite** from [https://sqlitebrowser.org](https://sqlitebrowser.org).
-
----
-
-## Project structure
-
-```
-conversation_ai/
-├── cli.py                  ← Run this to start the terminal tool
-├── main.py                 ← FastAPI backend (for API access if needed)
-├── .env                    ← Your API key (create this yourself)
-├── requirements.txt        ← Python dependencies
+.                            # Repository root (no sub-folder to navigate into)
+├── main.py                  # FastAPI backend
+├── cli.py                   # Terminal interface
+├── .env                     # Your config (create from .env.example)
+├── .env.example             # Config template
+├── requirements.txt         # Python dependencies
+├── API.md                   # Complete API documentation for backend team
+├── README.md                # This file
 ├── data/
-│   └── conversations.db    ← Auto-created; stores all conversations
+│   └── conversations.db     # SQLite database (auto-created on first run)
 ├── services/
-│   ├── llm_client.py       ← Gemini AI client
-│   ├── database.py         ← SQLite read/write functions
-│   ├── reminder_service.py ← Reminder status computation (no AI)
-│   ├── followup_rules.py   ← Follow-up day rules by priority
-│   ├── notification_service.py ← Date/client filtering (no AI)
-│   └── utils.py            ← Lead ID normalisation
+│   ├── llm_client.py        # Gemini API client (google-genai SDK)
+│   ├── database.py          # SQLite read/write
+│   ├── reminder_service.py  # Reminder status computation (pure Python)
+│   ├── followup_rules.py    # Priority → days lookup (pure Python)
+│   ├── notification_service.py
+│   ├── toast_notifier.py    # Windows desktop notifications
+│   └── utils.py             # ID / time / date normalisation + get_today()
 ├── schemas/
-│   └── conversation_analysis.py ← Pydantic data models
-└── prompts/
-    ├── analysis_prompt.py  ← AI analysis prompt
-    └── qa_prompt.py        ← AI Q&A prompt
+│   └── conversation_analysis.py  # Pydantic models and enums
+├── prompts/
+│   ├── analysis_prompt.py   # AI prompts for conversation analysis
+│   └── qa_prompt.py         # AI prompt for Q&A
+└── tests/
+    ├── test_normalize.py    # Offline: ID, time, date normalisation
+    ├── test_reminder.py     # Offline: reminder status computation
+    ├── test_api.py          # Offline: all API endpoints (AI mocked)
+    ├── test_date_extraction.py   # Live-server only
+    ├── test_notifications.py     # Live-server only
+    └── test_pain_points.py       # Live-server only
 ```
 
 ---
 
-## Notes
+## Key Design Decisions
 
-- The AI model used is `gemini-2.0-flash-lite` by default — fast and within the free quota.
-- Responses from the AI typically take 3–8 seconds depending on conversation length and history size.
-- No internet connection is needed except for the Gemini API call itself.
-- The `.env` file contains your private API key — do not share it.
+| Decision | Reason |
+|---|---|
+| **`google-genai` SDK** (not `google-generativeai`) | `google-generativeai` is end-of-life (Nov 2025) |
+| **Default model: `gemini-2.5-flash-lite`** | No announced shutdown date; configurable via `GEMINI_MODEL` |
+| **Sync FastAPI endpoints for AI calls** | Prevents event-loop blocking during 3–8s Gemini latency |
+| **Local SQLite** | Zero-config for development; replace with PostgreSQL for multi-user |
+| **TIMEZONE env variable** | Server clocks are often UTC; without this, IST reminders are off by 5h30m |
+| **All "today" calculations timezone-aware** | `get_today()` in `services/utils.py` reads `TIMEZONE` env var |
+| **`/leads/due-today` returns OVERDUE too** | Overdue leads need immediate attention, not just today's scheduled ones |
+| **HTTP 502 for AI failures** | Distinguishes "our server crashed" (500) from "AI service unreachable" (502) |
+| **Swagger at `/docs`** | Backend team needs interactive reference |
+
+---
+
+## Environment Variables Reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | *(required)* | Your Google Gemini API key |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model to use for all AI calls |
+| `TIMEZONE` | `Asia/Kolkata` | Timezone for "today" calculations. Use any IANA timezone string. |

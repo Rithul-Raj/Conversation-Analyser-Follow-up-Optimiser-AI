@@ -37,10 +37,10 @@ from services.database import (
     get_lead_history, init_db, save_conversation,
 )
 from services.followup_rules import get_follow_up_days
-from services.llm_client import RateLimitError, analyze_conversation, ask_question
+from services.llm_client import MissingAPIKeyError, RateLimitError, analyze_conversation, ask_question
 from services.reminder_service import compute_reminder
 from services.notification_service import filter_by_date, get_daily_summary, find_by_client
-from services.utils import normalize_bde_id, normalize_date_input, normalize_lead_id
+from services.utils import normalize_bde_id, normalize_date_input, normalize_lead_id, get_today
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -70,8 +70,8 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
-    docs_url=None,    # Swagger UI disabled — use cli.py for interactive use
-    redoc_url=None,
+    docs_url="/docs",    # Swagger UI at http://localhost:8000/docs
+    redoc_url="/redoc",
 )
 
 # Allow all origins for local development. Lock this down in production.
@@ -154,6 +154,18 @@ async def rate_limit_handler(request: Request, exc: RateLimitError):
     )
 
 
+@app.exception_handler(MissingAPIKeyError)
+async def missing_key_handler(request: Request, exc: MissingAPIKeyError):
+    logger.error("Missing API key: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Server configuration error: GEMINI_API_KEY is not set. "
+                      "Contact the server administrator."
+        },
+    )
+
+
 @app.exception_handler(EnvironmentError)
 async def env_error_handler(request: Request, exc: EnvironmentError):
     logger.error("Server configuration error: %s", exc)
@@ -229,18 +241,19 @@ def analyze_conversation_endpoint(request: AnalyzeRequest):
         llm_output = analyze_conversation(request.conversation_text, history=history)
     except RateLimitError:
         raise
-    except EnvironmentError:
+    except MissingAPIKeyError:
         raise
     except ValueError as exc:
+        logger.warning("AI response invalid: %s", exc)
         raise HTTPException(
-            status_code=422,
-            detail=f"Could not extract valid analysis from AI response: {exc}",
+            status_code=502,
+            detail="The AI returned an unexpected response. Please try again.",
         )
     except RuntimeError as exc:
         logger.error("LLM call failed: %s", exc)
         raise HTTPException(
-            status_code=500,
-            detail="An unexpected error occurred while calling the AI service.",
+            status_code=502,
+            detail="The AI service is temporarily unavailable. Please try again.",
         )
 
     # 3. Deterministic derived fields — no AI involved
@@ -296,23 +309,62 @@ async def list_leads():
 @app.get(
     "/leads/due-today",
     tags=["Lead History"],
-    summary="Get all leads whose latest scheduled follow-up date is today.",
+    summary="Get TODAY and OVERDUE leads — the BDE's daily action list.",
 )
 async def leads_due_today():
     """
     Pure Python — no AI, no API cost, instant response.
 
     Returns all leads whose LATEST stored conversation has a
-    scheduled_followup_date matching today's date. Results include
-    the full analysis block for each matching lead.
+    scheduled_followup_date that is either:
+      - TODAY         (follow up must happen now)
+      - OVERDUE       (follow up was missed and needs immediate action)
 
-    Useful for the backend to display a daily dashboard of leads
-    that need attention today.
+    Each item includes the full analysis block AND a `reminder` block with
+    status, days_remaining, and a human-readable message.
+    Results are sorted: OVERDUE first, then TODAY.
     """
-    from datetime import date as _date
-    today_str = _date.today().strftime("%d %b %Y")
-    results = get_conversations_by_date(today_str)
-    return results
+    from schemas.conversation_analysis import ReminderStatus
+
+    today_str   = get_today().strftime("%d %b %Y")
+    today_leads = get_conversations_by_date(today_str)
+
+    # Enrich today leads with reminder blocks
+    result = []
+    for r in today_leads:
+        a       = r["analysis"]
+        reminder = compute_reminder(
+            a.get("scheduled_followup_date"),
+            a.get("scheduled_followup_time", "Not specified"),
+        )
+        result.append({**r, "reminder": reminder.to_dict()})
+
+    # Find overdue leads from ALL stored leads
+    seen = {r["lead_id"] for r in today_leads}
+    for lead_info in get_all_leads():
+        if lead_info["lead_id"] in seen:
+            continue
+        hist = get_lead_history(lead_info["lead_id"], limit=1, newest_first=True)
+        if not hist:
+            continue
+        a       = hist[0]["analysis"]
+        reminder = compute_reminder(
+            a.get("scheduled_followup_date"),
+            a.get("scheduled_followup_time", "Not specified"),
+        )
+        if reminder.status == ReminderStatus.OVERDUE:
+            result.append({
+                "lead_id":    hist[0]["lead_id"],
+                "bde_id":     hist[0]["bde_id"],
+                "analysis":   a,
+                "created_at": hist[0]["created_at"],
+                "reminder":   reminder.to_dict(),
+            })
+
+    # Sort OVERDUE first, TODAY second
+    _order = {"OVERDUE": 0, "TODAY": 1}
+    result.sort(key=lambda x: _order.get(x.get("reminder", {}).get("status", ""), 2))
+    return result
 
 
 @app.get(
@@ -549,14 +601,14 @@ def ask_conversation_endpoint(request: AskRequest):
     try:
         answer = ask_question(request.conversation_text, request.question)
     except RateLimitError:
-        raise  # handled by the exception handler above
-    except EnvironmentError:
+        raise
+    except MissingAPIKeyError:
         raise
     except RuntimeError as exc:
         logger.error("LLM call failed: %s", exc)
         raise HTTPException(
-            status_code=500,
-            detail="An unexpected error occurred while calling the AI service.",
+            status_code=502,
+            detail="The AI service is temporarily unavailable. Please try again.",
         )
 
     return AskResponse(answer=answer)

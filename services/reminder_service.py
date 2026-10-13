@@ -8,8 +8,9 @@ scheduled_followup_time string, computes:
   - reminder_message: human-readable string for the BDE
 """
 
-from datetime import date, datetime
+from datetime import datetime
 from schemas.conversation_analysis import ReminderStatus
+from services.utils import get_today
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ def compute_reminder(
             ),
         )
 
-    today      = date.today()
+    today      = get_today()
     days_delta = (target - today).days
     status     = _status_from_days(days_delta)
     message    = _build_message(status, days_delta, scheduled_followup_date, scheduled_followup_time)

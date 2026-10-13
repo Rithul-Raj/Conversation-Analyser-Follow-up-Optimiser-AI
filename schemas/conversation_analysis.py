@@ -138,27 +138,42 @@ class LLMAnalysisOutput(BaseModel):
         Normalise the AI-returned date to 'DD Mon YYYY' format.
 
         The prompt asks for 'DD Mon YYYY', but the AI occasionally returns
-        other formats (e.g. '20 October 2026', '2026-10-20', 'Oct 20, 2026').
-        This validator converts any recognised format so downstream code
-        (date search, reminder computation) always sees the canonical form.
+        other formats. This validator converts any recognised format.
+        If the value cannot be parsed as a real date, returns None so the
+        reminder status is NOT_SCHEDULED rather than saving garbage.
+
+        Recognised formats:
+          '%d %b %Y'   → 20 Oct 2026   (canonical)
+          '%d %B %Y'   → 20 October 2026
+          '%Y-%m-%d'   → 2026-10-20
+          '%B %d, %Y'  → October 20, 2026
+          '%b %d, %Y'  → Oct 20, 2026      ← abbreviated month
+          '%d/%m/%Y'   → 20/10/2026
+          '%m/%d/%Y'   → 10/20/2026
         """
         if v is None:
             return None
         if not isinstance(v, str):
             return None
+        text = v.strip()
+        if not text:
+            return None
         for fmt in (
-            "%d %b %Y",      # 20 Oct 2026   (canonical)
-            "%d %B %Y",      # 20 October 2026
-            "%Y-%m-%d",      # 2026-10-20
-            "%B %d, %Y",     # October 20, 2026
-            "%d/%m/%Y",      # 20/10/2026
-            "%m/%d/%Y",      # 10/20/2026
+            "%d %b %Y",
+            "%d %B %Y",
+            "%Y-%m-%d",
+            "%B %d, %Y",
+            "%b %d, %Y",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
         ):
             try:
-                return datetime.strptime(v.strip(), fmt).strftime("%d %b %Y")
+                return datetime.strptime(text, fmt).strftime("%d %b %Y")
             except ValueError:
                 continue
-        return v  # return as-is; schema enforcement will handle the rest
+        # Value looks like a string but no format matched — set to None
+        # so downstream code treats it as "not scheduled" cleanly.
+        return None
 
     @field_validator("client_pain_points", "client_recommendations")
     @classmethod

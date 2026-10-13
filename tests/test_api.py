@@ -277,3 +277,87 @@ def test_date_iso_format_normalisation():
     data["scheduled_followup_date"] = "2026-10-20"
     obj = LLMAnalysisOutput.model_validate(data)
     assert obj.scheduled_followup_date == "20 Oct 2026"
+
+
+def test_date_abbreviated_month_normalisation():
+    """'Oct 20, 2026' must normalise to '20 Oct 2026'."""
+    from schemas.conversation_analysis import LLMAnalysisOutput
+    data = MOCK_ANALYSIS.model_dump()
+    data["scheduled_followup_date"] = "Oct 20, 2026"
+    obj = LLMAnalysisOutput.model_validate(data)
+    assert obj.scheduled_followup_date == "20 Oct 2026"
+
+
+def test_impossible_date_returns_none():
+    """'31 Feb 2026' is an invalid date — schema must return None, not save garbage."""
+    from schemas.conversation_analysis import LLMAnalysisOutput
+    data = MOCK_ANALYSIS.model_dump()
+    data["scheduled_followup_date"] = "31 Feb 2026"
+    obj = LLMAnalysisOutput.model_validate(data)
+    assert obj.scheduled_followup_date is None
+
+
+def test_garbage_date_returns_none():
+    """Non-date string 'banana' → None."""
+    from schemas.conversation_analysis import LLMAnalysisOutput
+    data = MOCK_ANALYSIS.model_dump()
+    data["scheduled_followup_date"] = "banana"
+    obj = LLMAnalysisOutput.model_validate(data)
+    assert obj.scheduled_followup_date is None
+
+
+def test_relative_date_returns_none():
+    """Relative string 'tomorrow' → None (not parseable as absolute date)."""
+    from schemas.conversation_analysis import LLMAnalysisOutput
+    data = MOCK_ANALYSIS.model_dump()
+    data["scheduled_followup_date"] = "tomorrow"
+    obj = LLMAnalysisOutput.model_validate(data)
+    assert obj.scheduled_followup_date is None
+
+
+# ─── Error scenario tests ───────────────────────────────────────────────────
+
+def test_analyze_429_rate_limit(client):
+    """RateLimitError from AI layer must propagate as HTTP 429."""
+    from services.llm_client import RateLimitError
+    with patch("main.analyze_conversation", side_effect=RateLimitError("quota")):
+        r = client.post("/analyze-conversation", json=ANALYZE_PAYLOAD)
+    assert r.status_code == 429
+    assert "rate limit" in r.json()["detail"].lower()
+
+
+def test_analyze_502_ai_runtime_error(client):
+    """RuntimeError from AI layer must return HTTP 502 (not 500)."""
+    with patch("main.analyze_conversation", side_effect=RuntimeError("Gemini API error 503: overloaded")):
+        r = client.post("/analyze-conversation", json=ANALYZE_PAYLOAD)
+    assert r.status_code == 502
+
+
+def test_analyze_500_missing_api_key(client):
+    """MissingAPIKeyError must return HTTP 500 with a clear message."""
+    from services.llm_client import MissingAPIKeyError
+    with patch("main.analyze_conversation", side_effect=MissingAPIKeyError("GEMINI_API_KEY not set")):
+        r = client.post("/analyze-conversation", json=ANALYZE_PAYLOAD)
+    assert r.status_code == 500
+    assert "GEMINI_API_KEY" in r.json()["detail"]
+
+
+def test_ask_429_rate_limit(client):
+    """RateLimitError in /ask-conversation must propagate as HTTP 429."""
+    from services.llm_client import RateLimitError
+    with patch("main.ask_question", side_effect=RateLimitError("quota")):
+        r = client.post("/ask-conversation", json=ASK_PAYLOAD)
+    assert r.status_code == 429
+
+
+def test_ask_502_ai_runtime_error(client):
+    """RuntimeError in /ask-conversation must return HTTP 502."""
+    with patch("main.ask_question", side_effect=RuntimeError("Gemini API error 503: overloaded")):
+        r = client.post("/ask-conversation", json=ASK_PAYLOAD)
+    assert r.status_code == 502
+
+
+def test_swagger_ui_accessible(client):
+    """Swagger UI must be accessible at /docs."""
+    r = client.get("/docs")
+    assert r.status_code == 200

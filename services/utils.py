@@ -1,7 +1,10 @@
 """
 Shared utility functions used by both cli.py and main.py.
 """
+import os
 import re
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 
 def normalize_lead_id(raw: str) -> str:
@@ -88,3 +91,18 @@ def normalize_date_input(raw: str) -> str:
             pass
     return raw.strip()
 
+
+def get_today():
+    """
+    Return today's date in the project timezone.
+
+    Reads the TIMEZONE environment variable (default: Asia/Kolkata / IST).
+    This ensures reminders, AI prompts, and date searches are all consistent,
+    even when the server clock is UTC (e.g. on a Linux host).
+    """
+    tz_name = os.getenv("TIMEZONE", "Asia/Kolkata")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Asia/Kolkata")
+    return datetime.now(tz=tz).date()

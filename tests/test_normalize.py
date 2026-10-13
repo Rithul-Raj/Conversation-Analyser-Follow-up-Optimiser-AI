@@ -53,6 +53,21 @@ date_cases = [
     ("1 Jan 2027",  "01 Jan 2027"),
 ]
 
+# ─── Schema date normaliser (LLMAnalysisOutput.normalise_date_format) ────────
+
+schema_date_cases = [
+    # (input,               expected_output)
+    ("20 October 2026",    "20 Oct 2026"),   # full month name
+    ("2026-10-20",         "20 Oct 2026"),   # ISO format
+    ("October 20, 2026",   "20 Oct 2026"),   # long month, comma
+    ("Oct 20, 2026",       "20 Oct 2026"),   # abbreviated month, comma
+    ("20/10/2026",         "20 Oct 2026"),   # DD/MM/YYYY
+    ("31 Feb 2026",        None),             # impossible date → None
+    ("banana",             None),             # garbage → None
+    ("tomorrow",           None),             # relative date → None
+    (None,                 None),             # already None → None
+]
+
 
 def run_section(title, cases, fn):
     print(f"\n{'─'*60}")
@@ -84,6 +99,28 @@ def test_date_normalisation():
     """pytest-compatible: all date normalisations pass."""
     for raw, expected in date_cases:
         assert normalize_date_input(raw) == expected, f"Failed for {raw!r}"
+
+
+def test_schema_date_normaliser():
+    """pytest: schema-level date normaliser converts formats and returns None for bad dates."""
+    from schemas.conversation_analysis import LLMAnalysisOutput, SalesStage, Priority, RecommendedAction, ConversationMode
+    base_data = dict(
+        sales_stage=SalesStage.EVALUATION,
+        priority=Priority.MEDIUM,
+        recommended_action=RecommendedAction.SEND_DOCUMENTATION,
+        conversation_mode=ConversationMode.PROFESSIONAL,
+        motive_summary="Test",
+        scheduled_followup_time="11:00 AM",
+        client_pain_points=[],
+        client_recommendations=[],
+    )
+    for raw, expected in schema_date_cases:
+        data = {**base_data, "scheduled_followup_date": raw}
+        obj = LLMAnalysisOutput.model_validate(data)
+        assert obj.scheduled_followup_date == expected, (
+            f"Schema normaliser failed for {raw!r}: got {obj.scheduled_followup_date!r}, "
+            f"expected {expected!r}"
+        )
 
 
 if __name__ == "__main__":

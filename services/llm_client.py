@@ -1,5 +1,5 @@
 """
-Gemini API client — uses the google-genai SDK (replaces google-generativeai).
+Gemini API client — uses the google-genai SDK (google-genai 2.x).
 
 Responsibilities:
   1. Call the Gemini API with a system + user prompt.
@@ -7,16 +7,16 @@ Responsibilities:
   3. Retry exactly once if the response is malformed or contains invalid enum values.
   4. Raise a clear exception if both attempts fail — never return bad data silently.
   5. Surface rate-limit errors as RateLimitError so main.py can return HTTP 429.
-  6. Raise EnvironmentError early (with a clear message) if the API key is missing.
+  6. Raise MissingAPIKeyError (not EnvironmentError) when GEMINI_API_KEY is absent.
 """
 
 import json
 import logging
 import os
-from datetime import date
 from functools import lru_cache
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from prompts.analysis_prompt import (
@@ -26,18 +26,24 @@ from prompts.analysis_prompt import (
 )
 from prompts.qa_prompt import QA_SYSTEM_PROMPT, build_qa_prompt
 from schemas.conversation_analysis import LLMAnalysisOutput
+from services.utils import get_today
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# Custom exception — raised when Gemini returns HTTP 429
+# Custom exceptions
 # ---------------------------------------------------------------------------
+class MissingAPIKeyError(Exception):
+    """Raised when GEMINI_API_KEY is not set in the environment."""
+
+
 class RateLimitError(Exception):
-    """Raised when the Gemini API rate limit is exceeded."""
+    """Raised when the Gemini API returns HTTP 429."""
 
 
 # ---------------------------------------------------------------------------
-# Module-level config — read once at import time
+# Module-level config
 # ---------------------------------------------------------------------------
 _api_key    = os.getenv("GEMINI_API_KEY", "")
 _model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
@@ -47,12 +53,11 @@ _model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 def _get_client() -> genai.Client:
     """
     Return a cached Gemini client.
-    Raises EnvironmentError immediately if the API key is not set,
-    so the error surfaces at request time with a clear message.
+    Raises MissingAPIKeyError immediately if the API key is not set.
     """
     if not _api_key:
-        raise EnvironmentError(
-            "GEMINI_API_KEY is not set. Add it to your .env file."
+        raise MissingAPIKeyError(
+            "GEMINI_API_KEY is not set. Add it to your .env file and restart the server."
         )
     return genai.Client(api_key=_api_key)
 
@@ -62,9 +67,9 @@ def _call_gemini(system_instruction: str, user_message: str) -> str:
     Send a single user message to Gemini and return the raw text response.
 
     Raises:
-        EnvironmentError   : API key not configured.
+        MissingAPIKeyError : GEMINI_API_KEY not configured.
         RateLimitError     : Gemini returned HTTP 429.
-        RuntimeError       : Any other Gemini error.
+        RuntimeError       : Any other Gemini API error (includes HTTP status code).
     """
     try:
         client = _get_client()
@@ -77,17 +82,20 @@ def _call_gemini(system_instruction: str, user_message: str) -> str:
             ),
         )
         return response.text.strip()
-    except EnvironmentError:
-        raise  # propagate missing-key error as-is
-    except Exception as exc:
-        # Detect rate limit by inspecting exception class name or message
-        exc_type = type(exc).__name__
-        exc_str  = str(exc)
-        if "429" in exc_str or "quota" in exc_str.lower() or "rate" in exc_str.lower() or "ResourceExhausted" in exc_type:
+    except MissingAPIKeyError:
+        raise
+    except genai_errors.APIError as exc:
+        # APIError has a `.status` attribute with the HTTP status code (int)
+        status = getattr(exc, "status", None)
+        if status == 429:
             raise RateLimitError(
                 "The Gemini API rate limit has been reached. Please wait and try again."
             ) from exc
-        raise RuntimeError(f"Gemini API call failed: {exc}") from exc
+        # Other API errors: include status code in the message for traceability
+        msg = getattr(exc, "message", str(exc))
+        raise RuntimeError(f"Gemini API error {status}: {msg}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Unexpected Gemini client error: {exc}") from exc
 
 
 def _parse_llm_json(raw_text: str) -> dict:
@@ -115,50 +123,46 @@ def analyze_conversation(
 
     Strategy:
       - Attempt 1: standard (or history-aware) analysis prompt.
-      - Attempt 2 (only if attempt 1 fails): retry prompt that includes the
-        invalid response and re-emphasises constraints.
-      - If both fail: raise ValueError with a clear message.
+      - Attempt 2: retry prompt that includes the invalid response.
+      - If both fail: raise ValueError.
 
     Args:
         conversation_text: The raw conversation summary from the BDE.
         history:           Optional list of past conversations for this lead
                            (oldest first), as returned by get_lead_history().
 
-    Returns:
-        A validated LLMAnalysisOutput instance.
-
     Raises:
-        EnvironmentError : API key not configured.
-        RateLimitError   : Gemini rate limit hit.
-        ValueError       : Both attempts produced invalid responses.
-        RuntimeError     : Unexpected Gemini API failure.
+        MissingAPIKeyError : API key not configured.
+        RateLimitError     : Gemini rate limit hit.
+        ValueError         : Both attempts produced invalid responses.
+        RuntimeError       : Unexpected Gemini API failure.
     """
-    today_date = date.today().strftime("%d %b %Y")
+    today_date = get_today().strftime("%d %b %Y")
 
     user_message = build_analysis_prompt_with_history(
         conversation_text, today_date, history or []
     )
 
-    for attempt in range(1, 3):   # max 2 attempts
+    for attempt in range(1, 3):
         raw = _call_gemini(ANALYSIS_SYSTEM_PROMPT, user_message)
         logger.debug("Gemini raw response (attempt %d): %s", attempt, raw[:500])
 
         try:
             data   = _parse_llm_json(raw)
             result = LLMAnalysisOutput.model_validate(data)
-            logger.info("LLM response validated successfully on attempt %d.", attempt)
+            logger.info("LLM response validated on attempt %d.", attempt)
             return result
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning(
-                "Attempt %d validation failed: %s. Raw: %s",
-                attempt, exc, raw[:300],
+                "Attempt %d validation failed: %s. Raw snippet: %s",
+                attempt, exc, raw[:200],
             )
             if attempt == 1:
                 user_message = build_retry_prompt(conversation_text, raw, today_date)
             else:
                 raise ValueError(
-                    f"LLM returned invalid data on both attempts. "
-                    f"Last raw response: {raw[:300]}"
+                    "The AI returned an unexpected response on both attempts. "
+                    "Please try again."
                 ) from exc
 
     raise ValueError("analyze_conversation: exhausted all retry attempts.")
@@ -168,13 +172,10 @@ def ask_question(conversation_text: str, question: str) -> str:
     """
     Answer any free-form question about a conversation using Gemini.
 
-    Single call — no retry needed because output is plain text, not a
-    structured object.
-
     Raises:
-        EnvironmentError : API key not configured.
-        RateLimitError   : Gemini rate limit hit.
-        RuntimeError     : Unexpected Gemini API failure.
+        MissingAPIKeyError : API key not configured.
+        RateLimitError     : Gemini rate limit hit.
+        RuntimeError       : Unexpected Gemini API failure.
     """
     user_message = build_qa_prompt(conversation_text, question)
     return _call_gemini(QA_SYSTEM_PROMPT, user_message)
