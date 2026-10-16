@@ -219,10 +219,11 @@ class ConversationAnalysisResponse(LLMAnalysisOutput):
     bde_id: str = Field(
         ..., description="Employee ID of the BDE who handled this conversation."
     )
-    conversation_id: int = Field(
-        ..., description="Auto-generated DB ID for this saved conversation."
+    conversation_id: str = Field(
+        ..., description="MongoDB ObjectId string for this saved conversation."
     )
     history_used: int = Field(
         ..., description="Number of past conversations included as context for this analysis."
     )
+
 

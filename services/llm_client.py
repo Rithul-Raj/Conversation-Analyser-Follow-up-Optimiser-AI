@@ -170,7 +170,8 @@ def analyze_conversation(
 
 def ask_question(conversation_text: str, question: str) -> str:
     """
-    Answer any free-form question about a conversation using Gemini.
+    Answer any free-form question about a single conversation using Gemini.
+    Used by Workflow 2 (conversation_text + question supplied directly).
 
     Raises:
         MissingAPIKeyError : API key not configured.
@@ -178,4 +179,36 @@ def ask_question(conversation_text: str, question: str) -> str:
         RuntimeError       : Unexpected Gemini API failure.
     """
     user_message = build_qa_prompt(conversation_text, question)
+    return _call_gemini(QA_SYSTEM_PROMPT, user_message)
+
+
+def ask_question_with_history(history: list[dict], question: str) -> str:
+    """
+    Answer a question using stored conversation history for a lead.
+    Used by Workflow 3 (lead_id + bde_id + question — history fetched from DB).
+
+    Args:
+        history:  List of past conversation dicts as returned by get_lead_history()
+                  (each has at least 'conversation_text' and 'created_at' keys).
+                  Ordered oldest → newest for best context.
+        question: The BDE's question about the lead's conversation history.
+
+    Raises:
+        MissingAPIKeyError : API key not configured.
+        RateLimitError     : Gemini rate limit hit.
+        ValueError         : History list is empty (caller should handle).
+        RuntimeError       : Unexpected Gemini API failure.
+    """
+    if not history:
+        raise ValueError("No conversation history found for this lead.")
+
+    # Build a combined context block from all stored conversations
+    context_parts = []
+    for i, conv in enumerate(history, start=1):
+        ts   = conv.get("created_at", "unknown date")
+        text = conv.get("conversation_text", "").strip()
+        context_parts.append(f"[Conversation {i} — {ts}]\n{text}")
+
+    combined_context = "\n\n".join(context_parts)
+    user_message = build_qa_prompt(combined_context, question)
     return _call_gemini(QA_SYSTEM_PROMPT, user_message)

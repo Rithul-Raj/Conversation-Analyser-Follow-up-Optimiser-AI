@@ -2,15 +2,21 @@
 FastAPI application — entry point.
 
 Endpoints:
-  POST /analyze-conversation       — structured sales analysis (AI)
-  POST /ask-conversation           — free-form Q&A about any conversation (AI)
-  POST /reminder-status            — compute reminder countdown for one lead (pure Python)
-  POST /notifications/by-date      — find all leads scheduled for a specific date/time
-  POST /notifications/daily        — today's urgent leads (OVERDUE / TODAY / TOMORROW)
-  POST /notifications/client       — find follow-ups for a specific client
+  POST /analyze-conversation        — Workflow 1: structured sales analysis + save to MongoDB
+  POST /ask-conversation            — Workflow 2: free-form Q&A (conversation + question)
+  POST /ask-by-lead                 — Workflow 3: Q&A using stored lead history (lead_id + bde_id + question)
+  POST /reminder-status             — compute reminder countdown for one lead (pure Python)
+  POST /notifications/by-date       — find all leads scheduled for a specific date/time
+  POST /notifications/daily         — today's urgent leads (OVERDUE / TODAY / TOMORROW)
+  POST /notifications/client        — find follow-ups for a specific client
+  GET  /leads                       — list all leads with stored conversations
+  GET  /leads/due-today             — today's + overdue leads from DB
+  GET  /leads/{lead_id}/history     — full conversation history for a lead
 
 Rate-limit errors from Gemini are caught here and returned as HTTP 429.
-All other unexpected errors return HTTP 500 with a safe message.
+AI failures (bad JSON, model error) → HTTP 502.
+Missing API key → HTTP 500.
+All other unexpected errors → HTTP 500.
 """
 
 import logging
@@ -32,12 +38,15 @@ from pydantic import BaseModel, Field, field_validator
 sys.path.insert(0, os.path.dirname(__file__))
 
 from schemas.conversation_analysis import ConversationAnalysisResponse, Reminder
-from services.database import (
+from services.mongo_database import (
     get_all_leads, get_conversations_by_date,
     get_lead_history, init_db, save_conversation,
 )
 from services.followup_rules import get_follow_up_days
-from services.llm_client import MissingAPIKeyError, RateLimitError, analyze_conversation, ask_question
+from services.llm_client import (
+    MissingAPIKeyError, RateLimitError,
+    analyze_conversation, ask_question, ask_question_with_history,
+)
 from services.reminder_service import compute_reminder
 from services.notification_service import filter_by_date, get_daily_summary, find_by_client
 from services.utils import normalize_bde_id, normalize_date_input, normalize_lead_id, get_today
@@ -56,9 +65,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app):
-    """Initialise the SQLite database at startup."""
+    """Initialise the MongoDB connection / indexes at startup."""
     init_db()
-    logger.info("Database initialised.")
+    logger.info("MongoDB initialised.")
     yield
 
 
@@ -66,9 +75,9 @@ app = FastAPI(
     title="Conversation Intelligence AI",
     description=(
         "LLM-powered system that analyses sales conversation summaries and "
-        "returns structured recommendations for BDEs."
+        "returns structured recommendations for BDEs. Backed by MongoDB."
     ),
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",    # Swagger UI at http://localhost:8000/docs
     redoc_url="/redoc",
@@ -113,10 +122,11 @@ class AnalyzeRequest(BaseModel):
 
 
 class AskRequest(BaseModel):
+    """Workflow 2: provide a conversation text + question directly."""
     conversation_text: str = Field(
         ...,
         min_length=20,
-        description="Full conversation summary pasted by the BDE.",
+        description="Full conversation summary provided by the BDE.",
     )
     question: str = Field(
         ...,
@@ -133,8 +143,46 @@ class AskRequest(BaseModel):
         return v
 
 
+class AskByLeadRequest(BaseModel):
+    """
+    Workflow 3: provide lead_id + bde_id + question.
+    The backend fetches conversation history from MongoDB and passes it to the AI.
+    """
+    lead_id: str = Field(
+        ...,
+        description="Lead ID whose conversation history will be used as context.",
+        examples=["LEAD-001"],
+    )
+    bde_id: str = Field(
+        ...,
+        description="Employee ID of the BDE making the query.",
+        examples=["EMP-042"],
+    )
+    question: str = Field(
+        ...,
+        min_length=5,
+        description="Any free-form question about the lead's past conversations.",
+        examples=["What are the key pain points raised by this lead across all conversations?"],
+    )
+
+    @field_validator("question", mode="after")
+    @classmethod
+    def must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("question must not be blank or whitespace-only.")
+        return v
+
+
 class AskResponse(BaseModel):
     answer: str = Field(..., description="Plain-text answer from the AI.")
+
+
+class AskByLeadResponse(BaseModel):
+    lead_id:          str = Field(..., description="The lead ID queried.")
+    bde_id:           str = Field(..., description="The BDE who raised the question.")
+    question:         str = Field(..., description="The question that was asked.")
+    answer:           str = Field(..., description="Plain-text answer from the AI.")
+    conversations_used: int = Field(..., description="Number of stored conversations used as context.")
 
 
 # ---------------------------------------------------------------------------
@@ -184,37 +232,38 @@ async def env_error_handler(request: Request, exc: EnvironmentError):
 @app.get("/health", tags=["Utility"])
 async def health_check():
     """Simple liveness probe."""
-    return {"status": "ok", "service": "conversation-intelligence-ai"}
+    return {"status": "ok", "service": "conversation-intelligence-ai", "db": "mongodb"}
 
 
 # ---------------------------------------------------------------------------
-# Endpoint 1: Structured conversation analysis
+# Workflow 1: Structured conversation analysis → save to MongoDB
 # ---------------------------------------------------------------------------
 @app.post(
     "/analyze-conversation",
     response_model=ConversationAnalysisResponse,
     tags=["Analysis"],
-    summary="Analyse a sales conversation and return structured recommendations.",
+    summary="[Workflow 1] Analyse a sales conversation and return structured recommendations.",
 )
 def analyze_conversation_endpoint(request: AnalyzeRequest):
     """
-    Accepts a lead_id, bde_id, and sales conversation summary. Returns:
-    - Current sales stage, priority, recommended action
+    **Workflow 1 — New Conversation Analysis**
+
+    Accepts a lead_id, bde_id, and sales conversation summary. The AI model generates:
+    - Sales stage, priority, recommended action
     - Conversation mode and motive summary
     - Extracted follow-up date and time
     - Client pain points and recommendations
-    - Reminder countdown block
-    - Follow-up days (derived from priority)
-    - conversation_id (DB row ID for this saved conversation)
-    - history_used (how many past conversations informed this analysis)
 
-    Past conversations for the same lead_id are automatically fetched and
-    injected as context so the AI can account for evolving intent.
+    Past conversations for the same lead_id are automatically fetched from MongoDB
+    and injected as context so the AI can account for evolving intent.
+
+    The conversation + AI output are saved to MongoDB. The full enriched response
+    (including reminder countdown and follow-up days) is returned to the caller.
+
     Retries once if the LLM returns an invalid/malformed response.
 
     Note: defined as a plain `def` (not async) so FastAPI runs it in a
-    thread-pool worker and the event loop is never blocked by the
-    synchronous Gemini and SQLite calls.
+    thread-pool worker and the event loop is never blocked by synchronous calls.
     """
     logger.info(
         "Received /analyze-conversation  lead_id=%s  bde_id=%s  (%d chars).",
@@ -232,7 +281,7 @@ def analyze_conversation_endpoint(request: AnalyzeRequest):
             detail="lead_id and bde_id must contain at least one alphanumeric character.",
         )
 
-    # 1. Fetch past conversations for this lead (up to 5, oldest first)
+    # 1. Fetch past conversations for this lead (up to 5, oldest first) from MongoDB
     history = get_lead_history(lead_id, limit=5)
     logger.info("History fetched: %d past conversation(s) for lead '%s'.", len(history), lead_id)
 
@@ -268,15 +317,15 @@ def analyze_conversation_endpoint(request: AnalyzeRequest):
         reminder_message=reminder_result.reminder_message,
     )
 
-    # 4. Save conversation + analysis to DB
-    analysis_dict = llm_output.model_dump()
+    # 4. Save conversation + analysis to MongoDB
+    analysis_dict   = llm_output.model_dump()
     conversation_id = save_conversation(
         lead_id=lead_id,
         bde_id=bde_id,
         conversation_text=request.conversation_text,
         analysis=analysis_dict,
     )
-    logger.info("Conversation saved: id=%d  lead=%s.", conversation_id, lead_id)
+    logger.info("Conversation saved to MongoDB: id=%s  lead=%s.", conversation_id, lead_id)
 
     # 5. Return full response
     return ConversationAnalysisResponse(
@@ -392,7 +441,135 @@ async def lead_history(
 
 
 # ---------------------------------------------------------------------------
-# Endpoint 2: Reminder status check (pure Python, no AI)
+# Workflow 2: Free-form Q&A — conversation text + question provided directly
+# ---------------------------------------------------------------------------
+@app.post(
+    "/ask-conversation",
+    response_model=AskResponse,
+    tags=["Q&A"],
+    summary="[Workflow 2] Ask any free-form question about a sales conversation.",
+)
+def ask_conversation_endpoint(request: AskRequest):
+    """
+    **Workflow 2 — Follow-up Question (Conversation + Question)**
+
+    The BDE provides the conversation text and a question directly.
+    The AI analyses the context and returns a plain-text answer.
+
+    No database read or write — pure stateless AI call.
+
+    Defined as plain `def` so the synchronous Gemini call runs in a
+    thread-pool worker and does not block the event loop.
+    """
+    logger.info(
+        "Received /ask-conversation request (%d chars, question: %s).",
+        len(request.conversation_text),
+        request.question[:80],
+    )
+
+    try:
+        answer = ask_question(request.conversation_text, request.question)
+    except RateLimitError:
+        raise
+    except MissingAPIKeyError:
+        raise
+    except RuntimeError as exc:
+        logger.error("LLM call failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="The AI service is temporarily unavailable. Please try again.",
+        )
+
+    return AskResponse(answer=answer)
+
+
+# ---------------------------------------------------------------------------
+# Workflow 3: Q&A using stored lead history (lead_id + bde_id + question)
+# ---------------------------------------------------------------------------
+@app.post(
+    "/ask-by-lead",
+    response_model=AskByLeadResponse,
+    tags=["Q&A"],
+    summary="[Workflow 3] Ask a question answered using the lead's stored conversation history.",
+)
+def ask_by_lead_endpoint(request: AskByLeadRequest):
+    """
+    **Workflow 3 — Follow-up Question (Lead ID + BDE ID + Question)**
+
+    The BDE provides their Lead ID, BDE ID, and a question.
+    The backend fetches the full conversation history for that lead from MongoDB,
+    passes all past conversations as context to the AI model, and returns the answer.
+
+    Use this when the BDE wants to ask something based on the full history of
+    interactions with a lead, without needing to paste the conversation manually.
+
+    The follow-up question and answer are NOT stored in MongoDB by default.
+    If persistence is needed, the backend team can extend this endpoint.
+
+    Defined as plain `def` so the synchronous Gemini call runs in a
+    thread-pool worker and does not block the event loop.
+    """
+    logger.info(
+        "Received /ask-by-lead  lead_id=%s  bde_id=%s  question: %s.",
+        request.lead_id, request.bde_id, request.question[:80],
+    )
+
+    # Normalize IDs
+    lead_id = normalize_lead_id(request.lead_id)
+    bde_id  = normalize_bde_id(request.bde_id)
+
+    if not lead_id or not bde_id:
+        raise HTTPException(
+            status_code=422,
+            detail="lead_id and bde_id must contain at least one alphanumeric character.",
+        )
+
+    # Fetch conversation history from MongoDB (up to 10, oldest first for best context)
+    history = get_lead_history(lead_id, limit=10, newest_first=False)
+    if not history:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No conversations found for lead '{lead_id}'. "
+                   f"Please run /analyze-conversation first to store a conversation.",
+        )
+
+    logger.info(
+        "Fetched %d conversation(s) for lead '%s' to answer question.",
+        len(history), lead_id,
+    )
+
+    # Call AI with combined conversation history as context
+    try:
+        answer = ask_question_with_history(history, request.question)
+    except RateLimitError:
+        raise
+    except MissingAPIKeyError:
+        raise
+    except ValueError as exc:
+        # Empty history — should not happen given the check above, but guard anyway
+        logger.warning("ask_question_with_history: %s", exc)
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+    except RuntimeError as exc:
+        logger.error("LLM call failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="The AI service is temporarily unavailable. Please try again.",
+        )
+
+    return AskByLeadResponse(
+        lead_id=lead_id,
+        bde_id=bde_id,
+        question=request.question,
+        answer=answer,
+        conversations_used=len(history),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endpoint: Reminder status check (pure Python, no AI)
 # ---------------------------------------------------------------------------
 class ReminderRequest(BaseModel):
     scheduled_followup_date: str | None = Field(
@@ -440,9 +617,6 @@ async def reminder_status_endpoint(request: ReminderRequest):
 
 # ---------------------------------------------------------------------------
 # Shared schema: ReminderEntry
-# A single lead record submitted by the BDE for notification queries.
-# NOTE: No database is connected yet. The BDE passes their own lead records
-# in the request body. Future DB integration will remove this requirement.
 # ---------------------------------------------------------------------------
 class ReminderEntry(BaseModel):
     client_id:               str | None = Field(None,  description="Any unique identifier for the client (e.g. CRM ID, phone, email).")
@@ -494,9 +668,6 @@ async def notifications_by_date(request: ByDateRequest):
     Submit your list of lead entries and a target date. Returns all leads
     whose scheduled_followup_date matches, sorted by urgency (OVERDUE first).
     Optionally filter by time as well.
-
-    **Future integration note:** Once a database is connected, the `entries`
-    field will be removed and the system will query the DB automatically.
     """
     raw = [e.model_dump() for e in request.entries]
     results = filter_by_date(raw, request.date, request.time)
@@ -526,9 +697,6 @@ async def notifications_daily(request: DailyRequest):
     Submit your full lead list. Returns only the urgent leads
     (OVERDUE, TODAY, TOMORROW) sorted by urgency — ideal for a
     morning check to know exactly which clients need immediate attention.
-
-    **Future integration note:** Once a database is connected, the `entries`
-    field will be removed and the system will query all leads from the DB.
     """
     raw = [e.model_dump() for e in request.entries]
     results = get_daily_summary(raw)
@@ -564,9 +732,6 @@ async def notifications_client(request: ClientRequest):
     match supported). Returns all matching entries with live reminder status
     and days remaining — so the BDE can see at a glance where a specific
     client stands.
-
-    **Future integration note:** Once a database is connected, the `entries`
-    field will be removed and the system will query the DB by client identifier.
     """
     raw = [e.model_dump() for e in request.entries]
     results = find_by_client(raw, request.identifier)
@@ -576,39 +741,3 @@ async def notifications_client(request: ClientRequest):
             detail=f"No leads found matching '{request.identifier}'.",
         )
     return results
-
-
-@app.post(
-    "/ask-conversation",
-    response_model=AskResponse,
-    tags=["Q&A"],
-    summary="Ask any free-form question about a sales conversation.",
-)
-def ask_conversation_endpoint(request: AskRequest):
-    """
-    Accepts a conversation summary and ANY question the BDE wants to ask,
-    and returns a plain-text answer.
-
-    Defined as plain `def` so the synchronous Gemini call runs in a
-    thread-pool worker and does not block the event loop.
-    """
-    logger.info(
-        "Received /ask-conversation request (%d chars, question: %s).",
-        len(request.conversation_text),
-        request.question[:80],
-    )
-
-    try:
-        answer = ask_question(request.conversation_text, request.question)
-    except RateLimitError:
-        raise
-    except MissingAPIKeyError:
-        raise
-    except RuntimeError as exc:
-        logger.error("LLM call failed: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail="The AI service is temporarily unavailable. Please try again.",
-        )
-
-    return AskResponse(answer=answer)

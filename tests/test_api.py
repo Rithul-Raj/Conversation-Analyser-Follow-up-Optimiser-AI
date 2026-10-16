@@ -32,8 +32,11 @@ from schemas.conversation_analysis import (
     SalesStage,
 )
 
-_TODAY = date.today().strftime("%d %b %Y")
+_TODAY  = date.today().strftime("%d %b %Y")
 _FUTURE = (date.today() + timedelta(days=8)).strftime("%d %b %Y")
+
+# MongoDB ObjectId string (24 hex chars)
+MOCK_CONVERSATION_ID = "6710f1a2b3c4d5e6f7a8b9c0"
 
 MOCK_ANALYSIS = LLMAnalysisOutput(
     sales_stage=SalesStage.EVALUATION,
@@ -49,18 +52,18 @@ MOCK_ANALYSIS = LLMAnalysisOutput(
 
 MOCK_HISTORY = [
     {
-        "id": 1,
-        "lead_id": "LEAD-001",
-        "bde_id": "EMP-042",
+        "id":                MOCK_CONVERSATION_ID,
+        "lead_id":           "LEAD-001",
+        "bde_id":            "EMP-042",
         "conversation_text": "First call with client.",
-        "analysis": MOCK_ANALYSIS.model_dump(),
-        "created_at": "2026-10-01T10:00:00+00:00",
+        "analysis":          MOCK_ANALYSIS.model_dump(),
+        "created_at":        "2026-10-01T10:00:00+00:00",
     }
 ]
 
 ANALYZE_PAYLOAD = {
     "lead_id": "LEAD-001",
-    "bde_id": "EMP-042",
+    "bde_id":  "EMP-042",
     "conversation_text": (
         "Client called to discuss integration. She mentioned their current "
         "CRM is too slow and wants a detailed technical spec. "
@@ -76,6 +79,12 @@ ASK_PAYLOAD = {
     "question": "Is the client price-sensitive or feature-sensitive?",
 }
 
+ASK_BY_LEAD_PAYLOAD = {
+    "lead_id":  "LEAD-001",
+    "bde_id":   "EMP-042",
+    "question": "What are the main pain points raised by this lead?",
+}
+
 
 # ─── App client (with all AI + DB mocked) ──────────────────────────────────
 
@@ -85,7 +94,8 @@ def client():
     Return a TestClient with:
       - analyze_conversation mocked (no Gemini call)
       - ask_question mocked (no Gemini call)
-      - save_conversation mocked (no SQLite write)
+      - ask_question_with_history mocked (no Gemini call)
+      - save_conversation mocked (returns a fake MongoDB ObjectId string)
       - get_lead_history mocked (returns empty list — no prior history)
       - get_all_leads mocked
     """
@@ -94,7 +104,8 @@ def client():
         patch("services.llm_client.ask_question", return_value="The client is feature-sensitive."),
         patch("main.analyze_conversation", return_value=MOCK_ANALYSIS),
         patch("main.ask_question", return_value="The client is feature-sensitive."),
-        patch("main.save_conversation", return_value=99),
+        patch("main.ask_question_with_history", return_value="The main pain point is a slow CRM."),
+        patch("main.save_conversation", return_value=MOCK_CONVERSATION_ID),
         patch("main.get_lead_history", return_value=[]),
         patch("main.get_all_leads", return_value=[
             {"lead_id": "LEAD-001", "total_interactions": 1,
@@ -111,6 +122,7 @@ def test_health_ok(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+    assert r.json()["db"] == "mongodb"
 
 
 # ─── /analyze-conversation ─────────────────────────────────────────────────
@@ -133,8 +145,14 @@ def test_analyze_response_has_required_fields(client):
         assert field in d, f"Missing field: {field}"
 
 
+def test_analyze_conversation_id_is_string(client):
+    """conversation_id must be a MongoDB ObjectId string, not an integer."""
+    r = client.post("/analyze-conversation", json=ANALYZE_PAYLOAD)
+    assert isinstance(r.json()["conversation_id"], str)
+
+
 def test_analyze_lead_id_normalised(client):
-    """'lead001' and 'LEAD-001' must both produce lead_id='LEAD-001'."""
+    "'lead001' and 'LEAD-001' must both produce lead_id='LEAD-001'."
     payload = {**ANALYZE_PAYLOAD, "lead_id": "lead001"}
     r = client.post("/analyze-conversation", json=payload)
     assert r.json()["lead_id"] == "LEAD-001"
@@ -161,7 +179,7 @@ def test_analyze_rejects_whitespace_only(client):
 
 
 def test_analyze_rejects_empty_lead_id(client):
-    """An ID that normalises to empty string must be rejected."""
+    "An ID that normalises to empty string must be rejected."
     payload = {**ANALYZE_PAYLOAD, "lead_id": "###"}
     r = client.post("/analyze-conversation", json=payload)
     assert r.status_code == 422
@@ -173,7 +191,7 @@ def test_analyze_rejects_missing_lead_id(client):
     assert r.status_code == 422
 
 
-# ─── /ask-conversation ─────────────────────────────────────────────────────
+# ─── /ask-conversation (Workflow 2) ────────────────────────────────────────
 
 def test_ask_returns_200(client):
     r = client.post("/ask-conversation", json=ASK_PAYLOAD)
@@ -191,6 +209,71 @@ def test_ask_rejects_whitespace_question(client):
     payload = {**ASK_PAYLOAD, "question": "     "}
     r = client.post("/ask-conversation", json=payload)
     assert r.status_code == 422
+
+
+# ─── /ask-by-lead (Workflow 3) ─────────────────────────────────────────────
+
+def test_ask_by_lead_returns_200(client):
+    """Workflow 3: lead_id + bde_id + question — returns AI answer from history."""
+    with patch("main.get_lead_history", return_value=MOCK_HISTORY):
+        r = client.post("/ask-by-lead", json=ASK_BY_LEAD_PAYLOAD)
+    assert r.status_code == 200
+    d = r.json()
+    assert "answer" in d
+    assert "lead_id" in d
+    assert "bde_id" in d
+    assert "question" in d
+    assert "conversations_used" in d
+
+
+def test_ask_by_lead_response_fields(client):
+    """Workflow 3 response must include lead_id, bde_id, question, answer, conversations_used."""
+    with patch("main.get_lead_history", return_value=MOCK_HISTORY):
+        r = client.post("/ask-by-lead", json=ASK_BY_LEAD_PAYLOAD)
+    d = r.json()
+    assert d["lead_id"] == "LEAD-001"
+    assert d["bde_id"]  == "EMP-042"
+    assert d["conversations_used"] == 1
+
+
+def test_ask_by_lead_404_unknown_lead(client):
+    """Workflow 3: unknown lead_id with no history must return 404."""
+    with patch("main.get_lead_history", return_value=[]):
+        r = client.post("/ask-by-lead", json=ASK_BY_LEAD_PAYLOAD)
+    assert r.status_code == 404
+
+
+def test_ask_by_lead_rejects_short_question(client):
+    payload = {**ASK_BY_LEAD_PAYLOAD, "question": "Ok"}
+    r = client.post("/ask-by-lead", json=payload)
+    assert r.status_code == 422
+
+
+def test_ask_by_lead_rejects_empty_lead_id(client):
+    payload = {**ASK_BY_LEAD_PAYLOAD, "lead_id": "###"}
+    r = client.post("/ask-by-lead", json=payload)
+    assert r.status_code == 422
+
+
+def test_ask_by_lead_429_rate_limit(client):
+    """RateLimitError in /ask-by-lead must propagate as HTTP 429."""
+    from services.llm_client import RateLimitError
+    with (
+        patch("main.get_lead_history", return_value=MOCK_HISTORY),
+        patch("main.ask_question_with_history", side_effect=RateLimitError("quota")),
+    ):
+        r = client.post("/ask-by-lead", json=ASK_BY_LEAD_PAYLOAD)
+    assert r.status_code == 429
+
+
+def test_ask_by_lead_502_ai_runtime_error(client):
+    """RuntimeError in /ask-by-lead must return HTTP 502."""
+    with (
+        patch("main.get_lead_history", return_value=MOCK_HISTORY),
+        patch("main.ask_question_with_history", side_effect=RuntimeError("Gemini API error 503")),
+    ):
+        r = client.post("/ask-by-lead", json=ASK_BY_LEAD_PAYLOAD)
+    assert r.status_code == 502
 
 
 # ─── /leads ────────────────────────────────────────────────────────────────
@@ -280,7 +363,7 @@ def test_date_iso_format_normalisation():
 
 
 def test_date_abbreviated_month_normalisation():
-    """'Oct 20, 2026' must normalise to '20 Oct 2026'."""
+    "'Oct 20, 2026' must normalise to '20 Oct 2026'."
     from schemas.conversation_analysis import LLMAnalysisOutput
     data = MOCK_ANALYSIS.model_dump()
     data["scheduled_followup_date"] = "Oct 20, 2026"
@@ -289,7 +372,7 @@ def test_date_abbreviated_month_normalisation():
 
 
 def test_impossible_date_returns_none():
-    """'31 Feb 2026' is an invalid date — schema must return None, not save garbage."""
+    "'31 Feb 2026' is an invalid date — schema must return None, not save garbage."
     from schemas.conversation_analysis import LLMAnalysisOutput
     data = MOCK_ANALYSIS.model_dump()
     data["scheduled_followup_date"] = "31 Feb 2026"
@@ -298,7 +381,7 @@ def test_impossible_date_returns_none():
 
 
 def test_garbage_date_returns_none():
-    """Non-date string 'banana' → None."""
+    "Non-date string 'banana' → None."
     from schemas.conversation_analysis import LLMAnalysisOutput
     data = MOCK_ANALYSIS.model_dump()
     data["scheduled_followup_date"] = "banana"
@@ -307,7 +390,7 @@ def test_garbage_date_returns_none():
 
 
 def test_relative_date_returns_none():
-    """Relative string 'tomorrow' → None (not parseable as absolute date)."""
+    "Relative string 'tomorrow' → None (not parseable as absolute date)."
     from schemas.conversation_analysis import LLMAnalysisOutput
     data = MOCK_ANALYSIS.model_dump()
     data["scheduled_followup_date"] = "tomorrow"
@@ -318,7 +401,7 @@ def test_relative_date_returns_none():
 # ─── Error scenario tests ───────────────────────────────────────────────────
 
 def test_analyze_429_rate_limit(client):
-    """RateLimitError from AI layer must propagate as HTTP 429."""
+    "RateLimitError from AI layer must propagate as HTTP 429."
     from services.llm_client import RateLimitError
     with patch("main.analyze_conversation", side_effect=RateLimitError("quota")):
         r = client.post("/analyze-conversation", json=ANALYZE_PAYLOAD)
@@ -327,14 +410,14 @@ def test_analyze_429_rate_limit(client):
 
 
 def test_analyze_502_ai_runtime_error(client):
-    """RuntimeError from AI layer must return HTTP 502 (not 500)."""
+    "RuntimeError from AI layer must return HTTP 502 (not 500)."
     with patch("main.analyze_conversation", side_effect=RuntimeError("Gemini API error 503: overloaded")):
         r = client.post("/analyze-conversation", json=ANALYZE_PAYLOAD)
     assert r.status_code == 502
 
 
 def test_analyze_500_missing_api_key(client):
-    """MissingAPIKeyError must return HTTP 500 with a clear message."""
+    "MissingAPIKeyError must return HTTP 500 with a clear message."
     from services.llm_client import MissingAPIKeyError
     with patch("main.analyze_conversation", side_effect=MissingAPIKeyError("GEMINI_API_KEY not set")):
         r = client.post("/analyze-conversation", json=ANALYZE_PAYLOAD)
@@ -343,7 +426,7 @@ def test_analyze_500_missing_api_key(client):
 
 
 def test_ask_429_rate_limit(client):
-    """RateLimitError in /ask-conversation must propagate as HTTP 429."""
+    "RateLimitError in /ask-conversation must propagate as HTTP 429."
     from services.llm_client import RateLimitError
     with patch("main.ask_question", side_effect=RateLimitError("quota")):
         r = client.post("/ask-conversation", json=ASK_PAYLOAD)
@@ -351,13 +434,13 @@ def test_ask_429_rate_limit(client):
 
 
 def test_ask_502_ai_runtime_error(client):
-    """RuntimeError in /ask-conversation must return HTTP 502."""
+    "RuntimeError in /ask-conversation must return HTTP 502."
     with patch("main.ask_question", side_effect=RuntimeError("Gemini API error 503: overloaded")):
         r = client.post("/ask-conversation", json=ASK_PAYLOAD)
     assert r.status_code == 502
 
 
 def test_swagger_ui_accessible(client):
-    """Swagger UI must be accessible at /docs."""
+    "Swagger UI must be accessible at /docs."
     r = client.get("/docs")
     assert r.status_code == 200
