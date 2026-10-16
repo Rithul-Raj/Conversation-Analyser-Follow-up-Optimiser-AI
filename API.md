@@ -2,28 +2,31 @@
 # FollowUp AI — API Reference
 
 **Base URL (local):** `http://localhost:8000`  
-**Start server:** `uvicorn main:app --reload` (from `conversation_ai/` directory)  
+**Start server:** `uvicorn main:app --reload` (from the repo root directory)  
+**Interactive Docs:** `http://localhost:8000/docs` (Swagger UI)  
 **Auth:** None (add API key header before production)  
 **CORS:** All origins allowed in this version  
+**Database:** MongoDB (`followup_ai` database, `conversations` collection)
 
 > All request/response bodies are `application/json`.
 
 ---
 
-## Endpoints
+## Endpoints Overview
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/health` | Server health check |
-| POST | `/analyze-conversation` | Analyse a sales conversation (AI) |
-| POST | `/ask-conversation` | Ask a question about a conversation (AI) |
-| GET | `/leads` | List all leads with interaction counts |
-| GET | `/leads/due-today` | Leads scheduled for today (no AI) |
-| GET | `/leads/{lead_id}/history` | Conversation history for a lead |
-| POST | `/reminder-status` | Compute reminder status for a date (no AI) |
-| POST | `/notifications/by-date` | Filter a lead list by scheduled date |
-| POST | `/notifications/daily` | Filter a lead list to OVERDUE/TODAY/TOMORROW |
-| POST | `/notifications/client` | Search a lead list by client name or ID |
+| # | Method | Path | Workflow | Description |
+|---|---|---|---|---|
+| 1 | GET | `/health` | — | Server & DB health check |
+| 2 | POST | `/analyze-conversation` | **Workflow 1** | Analyse a conversation → save to MongoDB → return AI output |
+| 3 | POST | `/ask-conversation` | **Workflow 2** | Ask a question using a provided conversation text |
+| 4 | POST | `/ask-by-lead` | **Workflow 3** | Ask a question — history fetched from MongoDB by lead_id |
+| 5 | GET | `/leads` | — | List all leads with interaction counts |
+| 6 | GET | `/leads/due-today` | — | Leads scheduled for today + overdue leads |
+| 7 | GET | `/leads/{lead_id}/history` | — | Full conversation history for a lead |
+| 8 | POST | `/reminder-status` | — | Compute reminder status for any date (no AI) |
+| 9 | POST | `/notifications/by-date` | — | Filter a lead list by scheduled date |
+| 10 | POST | `/notifications/daily` | — | Filter a lead list to OVERDUE/TODAY/TOMORROW |
+| 11 | POST | `/notifications/client` | — | Search a lead list by client name or ID |
 
 ---
 
@@ -35,15 +38,20 @@
 ```json
 {
   "status": "ok",
-  "service": "conversation-intelligence-ai"
+  "service": "conversation-intelligence-ai",
+  "db": "mongodb"
 }
 ```
 
 ---
 
-## 2. POST /analyze-conversation
+## 2. POST /analyze-conversation  *(Workflow 1)*
 
-The core endpoint. Calls Gemini AI, saves the result to SQLite, and returns structured intelligence.
+**The core endpoint.** Calls Gemini AI, saves the result to MongoDB, and returns structured intelligence.
+
+- Past conversations for the same `lead_id` are automatically fetched from MongoDB and injected as context.
+- Retries once if the LLM returns malformed JSON.
+- Returns the MongoDB `conversation_id` (24-char hex string) of the saved document.
 
 ### Request
 
@@ -82,10 +90,13 @@ The core endpoint. Calls Gemini AI, saves the result to SQLite, and returns stru
   },
   "lead_id": "LEAD-001",
   "bde_id": "EMP-042",
-  "conversation_id": 14,
+  "conversation_id": "6ad1d11ea39f47a14b11d60c",
   "history_used": 2
 }
 ```
+
+> **`conversation_id`** is a MongoDB ObjectId string (24 hex chars). Store this if you need to reference or link this specific conversation later.  
+> **`history_used`** tells you how many past conversations from MongoDB were used as AI context.
 
 **Enum values:**
 
@@ -121,13 +132,6 @@ The core endpoint. Calls Gemini AI, saves the result to SQLite, and returns stru
 }
 ```
 
-**422 — AI returned invalid data after 2 retries:**
-```json
-{
-  "detail": "The AI returned an unexpected response. Please try again."
-}
-```
-
 **429 — Rate limit:**
 ```json
 {
@@ -142,11 +146,18 @@ The core endpoint. Calls Gemini AI, saves the result to SQLite, and returns stru
 }
 ```
 
+**502 — AI failure (model error / bad response):**
+```json
+{
+  "detail": "The AI service is temporarily unavailable. Please try again."
+}
+```
+
 ---
 
-## 3. POST /ask-conversation
+## 3. POST /ask-conversation  *(Workflow 2)*
 
-Answer any free-form question about a conversation. Single Gemini call, plain-text response.
+**Follow-up Question — Case 1:** The frontend provides a conversation text and a question directly. The AI answers based on the provided context. No database read or write.
 
 ### Request
 
@@ -172,11 +183,60 @@ Answer any free-form question about a conversation. Single Gemini call, plain-te
 
 ### Error Responses
 
-Same 422 / 429 / 500 shapes as `/analyze-conversation`.
+Same 422 / 429 / 500 / 502 shapes as `/analyze-conversation`.
 
 ---
 
-## 4. GET /leads
+## 4. POST /ask-by-lead  *(Workflow 3)*
+
+**Follow-up Question — Case 2:** The frontend sends `lead_id`, `bde_id`, and a question. The backend fetches the full conversation history from MongoDB and passes it to the AI as context. No conversation text needs to be provided by the caller.
+
+> Use this when the BDE wants to ask something based on the full history of all past interactions with a lead.
+
+### Request
+
+```json
+{
+  "lead_id": "LEAD-001",
+  "bde_id": "EMP-042",
+  "question": "What are the main pain points raised by this lead across all conversations?"
+}
+```
+
+| Field | Type | Required | Rules |
+|---|---|---|---|
+| `lead_id` | string | ✅ | Same normalisation as `/analyze-conversation` |
+| `bde_id` | string | ✅ | Same normalisation as `/analyze-conversation` |
+| `question` | string | ✅ | Min 5 chars, not blank |
+
+### Response 200
+
+```json
+{
+  "lead_id": "LEAD-001",
+  "bde_id": "EMP-042",
+  "question": "What are the main pain points raised by this lead across all conversations?",
+  "answer": "Across all conversations with Priya Nair at TechCorp, the main pain points raised are slow CRM performance and ongoing data migration issues. The client has also highlighted the need for clear SLA guarantees before committing.",
+  "conversations_used": 3
+}
+```
+
+> **`conversations_used`** is the number of stored MongoDB conversations used as context for the answer.
+
+### Error Responses
+
+**404 — No history found:**
+```json
+{
+  "detail": "No conversations found for lead 'LEAD-001'. Please run /analyze-conversation first to store a conversation."
+}
+```
+
+**422, 429, 500, 502** — Same shapes as `/analyze-conversation`.
+
+---
+
+## 5. GET /leads
 
 Returns all leads that have at least one stored conversation.
 
@@ -189,23 +249,21 @@ Returns all leads that have at least one stored conversation.
   {
     "lead_id": "LEAD-001",
     "total_interactions": 3,
-    "last_interaction": "2026-10-12T10:30:00+05:30"
+    "last_interaction": "2026-10-16T07:31:12.025058+00:00"
   },
   {
     "lead_id": "LEAD-002",
     "total_interactions": 1,
-    "last_interaction": "2026-10-10T14:00:00+05:30"
+    "last_interaction": "2026-10-10T14:00:00+00:00"
   }
 ]
 ```
 
 ---
 
-## 5. GET /leads/due-today
+## 6. GET /leads/due-today
 
-Returns all leads whose **latest** scheduled follow-up date is today. Pure Python — no AI, instant response. Useful for daily dashboard.
-
-> ⚠️ This endpoint must be defined **before** `/leads/{lead_id}/history` in the router so FastAPI does not interpret "due-today" as a `lead_id` path parameter.
+Returns all leads whose **latest** scheduled follow-up date is today **or overdue**. Pure Python — no AI, instant. Ideal for a daily action dashboard.
 
 **No request body. No query params.**
 
@@ -220,22 +278,27 @@ Returns all leads whose **latest** scheduled follow-up date is today. Pure Pytho
       "sales_stage": "NEGOTIATION",
       "priority": "HIGH",
       "recommended_action": "CALL_CLIENT",
-      "scheduled_followup_date": "13 Oct 2026",
+      "scheduled_followup_date": "16 Oct 2026",
       "scheduled_followup_time": "11:00 AM",
       "motive_summary": "Client ready to finalize pricing.",
       "client_pain_points": [],
       "client_recommendations": []
     },
-    "created_at": "2026-10-12T10:30:00+05:30"
+    "created_at": "2026-10-15T10:30:00+00:00",
+    "reminder": {
+      "status": "TODAY",
+      "days_remaining": 0,
+      "reminder_message": "Follow up today — 16 Oct 2026 at 11:00 AM."
+    }
   }
 ]
 ```
 
-Returns `[]` if no leads are scheduled for today.
+Returns `[]` if no leads are scheduled for today or overdue.
 
 ---
 
-## 6. GET /leads/{lead_id}/history
+## 7. GET /leads/{lead_id}/history
 
 Returns stored conversations for a lead, **newest first**.
 
@@ -250,7 +313,7 @@ Returns stored conversations for a lead, **newest first**.
 ```json
 [
   {
-    "id": 14,
+    "id": "6ad1d11ea39f47a14b11d60c",
     "lead_id": "LEAD-001",
     "bde_id": "EMP-042",
     "conversation_text": "Called Priya Nair. She confirmed the follow-up for tomorrow at 11 AM.",
@@ -260,23 +323,17 @@ Returns stored conversations for a lead, **newest first**.
       "recommended_action": "CALL_CLIENT",
       "conversation_mode": "PROFESSIONAL",
       "motive_summary": "Client is ready to finalize pricing.",
-      "scheduled_followup_date": "13 Oct 2026",
+      "scheduled_followup_date": "17 Oct 2026",
       "scheduled_followup_time": "11:00 AM",
       "client_pain_points": [],
       "client_recommendations": ["Requested callback tomorrow at 11 AM"]
     },
-    "created_at": "2026-10-12T10:30:00+05:30"
-  },
-  {
-    "id": 7,
-    "lead_id": "LEAD-001",
-    "bde_id": "EMP-042",
-    "conversation_text": "First call with Priya. She asked about integration.",
-    "analysis": { "..." : "..." },
-    "created_at": "2026-10-01T09:00:00+05:30"
+    "created_at": "2026-10-16T07:31:12.025058+00:00"
   }
 ]
 ```
+
+> **`id`** is the MongoDB ObjectId string for this specific conversation document.
 
 ### Error Responses
 
@@ -303,7 +360,7 @@ Returns stored conversations for a lead, **newest first**.
 
 ---
 
-## 7. POST /reminder-status
+## 8. POST /reminder-status
 
 Compute reminder status for any date/time combination. Pure Python — no AI, no API cost.
 
@@ -326,8 +383,8 @@ Compute reminder status for any date/time combination. Pure Python — no AI, no
 ```json
 {
   "status": "UPCOMING",
-  "days_remaining": 7,
-  "reminder_message": "Follow up in 7 days — 20 Oct 2026 at 11:00 AM."
+  "days_remaining": 4,
+  "reminder_message": "Follow up in 4 days — 20 Oct 2026 at 11:00 AM."
 }
 ```
 
@@ -342,26 +399,26 @@ Compute reminder status for any date/time combination. Pure Python — no AI, no
 
 ---
 
-## 8–10. POST /notifications/by-date, /daily, /client
+## 9–11. Notification Endpoints (Stateless Filters)
 
-> ⚠️ **These endpoints require the caller to supply the full lead list.** They are stateless filters — they do not query the database directly. For a DB-backed "leads due today" query, use `GET /leads/due-today` instead.
+> ⚠️ **These endpoints require the caller to supply the full lead list in the request body.** They are stateless filters — they do not query MongoDB. For a DB-backed "leads due today" query, use `GET /leads/due-today` instead.
 
-### 8. POST /notifications/by-date
+### 9. POST /notifications/by-date
 
 Filter leads by scheduled date (and optionally time).
 
 **Request:**
 ```json
 {
-  "date": "13 Oct 2026",
+  "date": "16 Oct 2026",
   "time": "11:00 AM",
   "entries": [
     {
-      "lead_id": "LEAD-001",
       "client_name": "Priya Nair",
       "client_id": "CLIENT-101",
-      "scheduled_followup_date": "13 Oct 2026",
-      "scheduled_followup_time": "11:00 AM"
+      "scheduled_followup_date": "16 Oct 2026",
+      "scheduled_followup_time": "11:00 AM",
+      "notes": "Follow up on pricing"
     }
   ]
 }
@@ -372,46 +429,59 @@ Filter leads by scheduled date (and optionally time).
 ```json
 [
   {
-    "lead_id": "LEAD-001",
     "client_name": "Priya Nair",
     "client_id": "CLIENT-101",
-    "scheduled_followup_date": "13 Oct 2026",
+    "scheduled_followup_date": "16 Oct 2026",
     "scheduled_followup_time": "11:00 AM",
+    "notes": "Follow up on pricing",
     "reminder": {
       "status": "TODAY",
       "days_remaining": 0,
-      "reminder_message": "Follow up today — 13 Oct 2026 at 11:00 AM."
+      "reminder_message": "Follow up today — 16 Oct 2026 at 11:00 AM."
     }
   }
 ]
 ```
 
-### 9. POST /notifications/daily
+### 10. POST /notifications/daily
 
 Return entries with status `OVERDUE`, `TODAY`, or `TOMORROW`, sorted by urgency.
 
 **Request:**
 ```json
 {
-  "entries": [ { "...": "..." } ]
+  "entries": [
+    {
+      "client_name": "Priya Nair",
+      "scheduled_followup_date": "16 Oct 2026",
+      "scheduled_followup_time": "11:00 AM"
+    }
+  ]
 }
 ```
 
-**Response 200:** Same shape as above, sorted OVERDUE → TODAY → TOMORROW.
+**Response 200:** Same shape as `/notifications/by-date`, sorted OVERDUE → TODAY → TOMORROW.
 
-### 10. POST /notifications/client
+### 11. POST /notifications/client
 
-Search entries by client name or client_id substring (case-insensitive).
+Search entries by client name or `client_id` substring (case-insensitive).
 
 **Request:**
 ```json
 {
   "identifier": "priya",
-  "entries": [ { "...": "..." } ]
+  "entries": [
+    {
+      "client_name": "Priya Nair",
+      "client_id": "CLIENT-101",
+      "scheduled_followup_date": "16 Oct 2026",
+      "scheduled_followup_time": "11:00 AM"
+    }
+  ]
 }
 ```
 
-**Response 200:** Matching entries enriched with reminder block.
+**Response 200:** Matching entries enriched with reminder block. Returns `404` if nothing matches.
 
 ---
 
@@ -420,10 +490,11 @@ Search entries by client name or client_id substring (case-insensitive).
 | HTTP Code | When |
 |---|---|
 | 200 | Success |
-| 404 | Lead not found in database |
-| 422 | Invalid request body (field-level validation errors or empty ID) |
+| 404 | Lead not found in MongoDB, or no matching notification entries |
+| 422 | Invalid request body (field-level validation errors or empty normalized ID) |
 | 429 | Gemini API rate limit exceeded |
 | 500 | Missing API key or unexpected server error |
+| 502 | AI service failure (model returned bad response or is temporarily unavailable) |
 
 ### 422 Shape — validation errors (list)
 ```json
@@ -451,7 +522,12 @@ Search entries by client name or client_id substring (case-insensitive).
 
 ---
 
-## Setup for Backend Integration
+## Backend Integration — Setup Instructions
+
+### Prerequisites
+- Python 3.11+
+- MongoDB running locally or a MongoDB Atlas connection URI
+- A Gemini API key (free at https://aistudio.google.com/app/apikey)
 
 ### 1. Clone the repository
 ```
@@ -460,43 +536,87 @@ cd Conversation-Analyser-Follow-up-Optimiser-AI
 ```
 
 ### 2. Create a virtual environment
-```
+```bash
 python -m venv venv
-venv\Scripts\activate      # Windows
-source venv/bin/activate   # Linux/Mac
+
+# Windows
+venv\Scripts\activate
+
+# Linux / Mac
+source venv/bin/activate
 ```
 
 ### 3. Install dependencies
-```
+```bash
 pip install -r requirements.txt
 ```
 
 ### 4. Configure environment variables
-Copy `.env.example` to `.env` and fill in your Gemini API key:
+
+Copy `.env.example` to `.env` and fill in your values:
 ```
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash-lite        # optional — this is the default
-```
-Get a free API key at: https://aistudio.google.com/app/apikey
 
-### 5. Run the API server
+# MongoDB — local default shown; replace with Atlas URI for cloud
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB_NAME=followup_ai
+
+# Optional
+GEMINI_MODEL=gemini-3.5-flash-lite
+TIMEZONE=Asia/Kolkata
 ```
+
+### 5. Start MongoDB
+```bash
+# Windows (MongoDB installed as a service — already running)
+# If not running:
+net start MongoDB
+
+# Linux / Mac
+mongod --dbpath /data/db
+```
+
+### 6. Run the API server
+```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 6. Run the offline test suite (no API key needed)
+Server is ready when you see:
 ```
-pytest tests/test_normalize.py tests/test_reminder.py tests/test_api.py -v
+MongoDB initialised.
+Uvicorn running on http://0.0.0.0:8000
 ```
-Expected output: **32 passed**
+
+### 7. Verify with health check
+```bash
+curl http://localhost:8000/health
+# Expected: {"status":"ok","service":"conversation-intelligence-ai","db":"mongodb"}
+```
+
+### 8. Run the offline test suite (no API key needed)
+```bash
+pytest tests/ -v
+```
+Expected output: **51 passed**
 
 ---
 
 ## Notes for Backend Team
 
 - **Lead ID normalisation** is automatic. `lead001`, `LEAD-001`, and `Lead_001` all resolve to `LEAD-001`. Send any format — the system handles it.
-- **AI call time** is 3–8 seconds for `/analyze-conversation` and `/ask-conversation`. Plan your frontend loading states accordingly.
-- **Database** is local SQLite at `data/conversations.db` (auto-created). For multi-instance deployment, switch to PostgreSQL by replacing `services/database.py` — all callers stay the same.
+
+- **MongoDB `conversation_id`** in the `/analyze-conversation` response is a 24-character hex string (MongoDB ObjectId). It can be stored in your system to reference a specific conversation document.
+
+- **Workflow order matters for Workflow 3:** `/ask-by-lead` fetches history from MongoDB. The lead must have at least one stored conversation (via `/analyze-conversation`) before calling this endpoint, otherwise a `404` is returned.
+
+- **AI call time** is 3–8 seconds for `/analyze-conversation`, `/ask-conversation`, and `/ask-by-lead`. Plan your frontend loading states accordingly.
+
 - **CORS** is `*` for development. Restrict to your frontend domain before production.
+
 - **No authentication** in this version. Add an API key header or JWT before production deployment.
-- **Scheduled date format** in DB is always `DD Mon YYYY` (e.g. `"13 Oct 2026"`). Use this format in date search queries.
+
+- **Scheduled date format** in the DB is always `DD Mon YYYY` (e.g. `"16 Oct 2026"`). Use this format in date search queries.
+
+- **502 vs 500:** `502` means the AI service failed (retry is safe). `500` means a server-side config error (do not retry automatically).
+
+- **MongoDB Atlas:** To use Atlas instead of local MongoDB, simply change `MONGO_URI` in `.env` to your Atlas connection string. No code changes required.
